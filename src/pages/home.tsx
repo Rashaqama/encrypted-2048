@@ -9,29 +9,13 @@ type Direction = "left" | "right" | "up" | "down";
 
 const BOARD_SIZE = 4;
 
-const ACHIEVEMENT_CONTRACT_ADDRESS =
-  "0xDE0c86c1c4607713Fd19e000661Ada864b6c493a";
-
-const BASE_SEPOLIA_CHAIN_ID_DECIMAL = 84532;
-const BASE_SEPOLIA_CHAIN_ID_HEX = "0x14a34";
+const ACHIEVEMENT_CONTRACT_ADDRESS = "0xDE0c86c1c4607713Fd19e000661Ada864b6c493a";
 
 const ACHIEVEMENT_CONTRACT_ABI = [
   {
-    inputs: [
-      {
-        internalType: "uint8",
-        name: "levelIndex",
-        type: "uint8",
-      },
-    ],
+    inputs: [{ internalType: "uint8", name: "levelIndex", type: "uint8" }],
     name: "mintAchievement",
-    outputs: [
-      {
-        internalType: "uint256",
-        name: "tokenId",
-        type: "uint256",
-      },
-    ],
+    outputs: [{ internalType: "uint256", name: "tokenId", type: "uint256" }],
     stateMutability: "nonpayable",
     type: "function",
   },
@@ -56,10 +40,10 @@ const TILE_LEVELS: TileLevelMeta[] = [
 
 function getTileLevel(value: number): TileLevelMeta {
   if (value < 16) return TILE_LEVELS[0];
-  else if (value < 128) return TILE_LEVELS[1];
-  else if (value < 512) return TILE_LEVELS[2];
-  else if (value < 2048) return TILE_LEVELS[3];
-  else return TILE_LEVELS[4];
+  if (value < 128) return TILE_LEVELS[1];
+  if (value < 512) return TILE_LEVELS[2];
+  if (value < 2048) return TILE_LEVELS[3];
+  return TILE_LEVELS[4];
 }
 
 type AchievementId = "medium_power" | "big_power" | "legendary_power";
@@ -105,12 +89,9 @@ const INITIAL_ACHIEVEMENTS: Achievement[] = [
 ];
 
 export default function Home() {
-  const [board, setBoard] = useState<Board>([
-    [null, null, null, null],
-    [null, null, null, null],
-    [null, null, null, null],
-    [null, null, null, null],
-  ]);
+  const [board, setBoard] = useState<Board>(() =>
+    Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null))
+  );
   const [score, setScore] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const [achievements, setAchievements] = useState(INITIAL_ACHIEVEMENTS);
@@ -120,10 +101,22 @@ export default function Home() {
 
   const { initialized } = useFHE();
 
+  const addRandomTile = (board: Board): Board => {
+    const empty: [number, number][] = [];
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      for (let j = 0; j < BOARD_SIZE; j++) {
+        if (board[i][j] === null) empty.push([i, j]);
+      }
+    }
+    if (empty.length === 0) return board;
+    const [r, c] = empty[Math.floor(Math.random() * empty.length)];
+    const newBoard = board.map(row => [...row]);
+    newBoard[r][c] = Math.random() < 0.9 ? 2 : 4;
+    return newBoard;
+  };
+
   const initializeBoard = () => {
-    let newBoard = Array(BOARD_SIZE)
-      .fill(null)
-      .map(() => Array(BOARD_SIZE).fill(null));
+    let newBoard = Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null));
     newBoard = addRandomTile(addRandomTile(newBoard));
     setBoard(newBoard);
     setScore(0);
@@ -131,55 +124,67 @@ export default function Home() {
     setAchievements(INITIAL_ACHIEVEMENTS);
   };
 
-  const addRandomTile = (board: Board): Board => {
-    const emptyCells: [number, number][] = [];
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      for (let j = 0; j < BOARD_SIZE; j++) {
-        if (board[i][j] === null) emptyCells.push([i, j]);
+  // Slide and merge a row to the left
+  const slideRowLeft = (row: CellValue[]): [CellValue[], number] => {
+    const filtered = row.filter(v => v !== null);
+    let scoreAdd = 0;
+    for (let j = 0; j < filtered.length - 1; j++) {
+      if (filtered[j] === filtered[j + 1]) {
+        filtered[j] *= 2;
+        scoreAdd += filtered[j];
+        filtered.splice(j + 1, 1);
+        j--;
       }
     }
-    if (emptyCells.length === 0) return board;
-    const [row, col] = emptyCells[Math.floor(Math.random() * emptyCells.length)];
-    const newBoard = board.map(row => [...row]);
-    newBoard[row][col] = Math.random() < 0.9 ? 2 : 4;
-    return newBoard;
+    return [filtered.concat(Array(BOARD_SIZE - filtered.length).fill(null)), scoreAdd];
   };
+
+  // Transpose the board
+  const transpose = (board: Board): Board => board[0].map((_, col) => board.map(row => row[col]));
+
+  // Reverse rows
+  const reverseRows = (board: Board): Board => board.map(row => row.reverse());
 
   const move = (direction: Direction) => {
     if (gameOver) return;
 
     let newBoard = board.map(row => [...row]);
+    let totalScoreAdd = 0;
     let moved = false;
-    let addedScore = 0;
 
-    if (direction === "right") {
-      newBoard = newBoard.map(row => row.reverse());
+    // Rotate to make direction "left"
+    if (direction === "up") {
+      newBoard = transpose(newBoard);
+    } else if (direction === "right") {
+      newBoard = reverseRows(newBoard);
     } else if (direction === "down") {
-      newBoard = newBoard[0].map((_, i) => newBoard.map(row => row[i])).reverse();
-    } else if (direction === "left") {
-      newBoard = newBoard[0].map((_, i) => newBoard.map(row => row[i]).reverse()).map(row => row.reverse());
+      newBoard = transpose(newBoard);
+      newBoard = reverseRows(newBoard);
+    }
+    // left: no rotation
+
+    // Slide left
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      const [newRow, scoreAdd] = slideRowLeft(newBoard[i]);
+      totalScoreAdd += scoreAdd;
+      if (JSON.stringify(newRow) !== JSON.stringify(newBoard[i])) moved = true;
+      newBoard[i] = newRow;
     }
 
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      let row = newBoard[i].filter(val => val !== null);
-      for (let j = 0; j < row.length - 1; j++) {
-        if (row[j] === row[j + 1]) {
-          row[j] *= 2;
-          addedScore += row[j];
-          row.splice(j + 1, 1);
-          j--;
-          moved = true;
-        }
-      }
-      row = row.concat(Array(BOARD_SIZE - row.length).fill(null));
-      newBoard[i] = row;
-      if (JSON.stringify(row) !== JSON.stringify(board[i])) moved = true;
+    // Unrotate to original orientation
+    if (direction === "up") {
+      newBoard = transpose(newBoard);
+    } else if (direction === "right") {
+      newBoard = reverseRows(newBoard);
+    } else if (direction === "down") {
+      newBoard = reverseRows(newBoard);
+      newBoard = transpose(newBoard);
     }
 
     if (moved) {
       newBoard = addRandomTile(newBoard);
       setBoard(newBoard);
-      setScore(prev => prev + addedScore);
+      setScore(prev => prev + totalScoreAdd);
 
       let maxValue = 0;
       newBoard.forEach(row => row.forEach(val => {
@@ -199,7 +204,7 @@ export default function Home() {
     }
   };
 
-  const isGameOver = (board: Board) => {
+  const isGameOver = (board: Board): boolean => {
     for (let i = 0; i < BOARD_SIZE; i++) {
       for (let j = 0; j < BOARD_SIZE; j++) {
         if (board[i][j] === null) return false;
@@ -215,7 +220,6 @@ export default function Home() {
       setTxMessage("Please connect wallet");
       return;
     }
-
     setIsClaiming(true);
     setTxMessage("Sending transaction...");
 
@@ -223,23 +227,19 @@ export default function Home() {
       const provider = new BrowserProvider((window as any).ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
-
       const contract = new Contract(ACHIEVEMENT_CONTRACT_ADDRESS, ACHIEVEMENT_CONTRACT_ABI, signer);
 
-      let levelIndex: number;
-      if (id === "medium_power") levelIndex = 0;
-      else if (id === "big_power") levelIndex = 1;
-      else levelIndex = 2;
+      const levelIndex = id === "medium_power" ? 0 : id === "big_power" ? 1 : 2;
 
       const tx = await contract.mintAchievement(levelIndex);
-      setTxMessage("Transaction sent, waiting for confirmation...");
+      setTxMessage("Transaction sent, waiting...");
       await tx.wait();
       setTxMessage("NFT minted successfully!");
 
       setAchievements(prev => prev.map(ach => ach.id === id ? { ...ach, claimed: true } : ach));
     } catch (err: any) {
-      console.error(err);
       setTxMessage(`Error: ${err.message || "Unknown"}`);
+      console.error(err);
     } finally {
       setIsClaiming(false);
     }
@@ -268,9 +268,9 @@ export default function Home() {
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowUp") move("up");
-      else if (e.key === "ArrowRight") move("right");
-      else if (e.key === "ArrowDown") move("down");
-      else if (e.key === "ArrowLeft") move("left");
+      if (e.key === "ArrowDown") move("down");
+      if (e.key === "ArrowLeft") move("left");
+      if (e.key === "ArrowRight") move("right");
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
@@ -282,6 +282,7 @@ export default function Home() {
         <h1 className="text-4xl font-bold text-center mb-2">Encrypted 2048 - test</h1>
         <p className="text-center text-muted-foreground mb-8">Score: {score}</p>
         {gameOver && <p className="text-center text-red-500 text-xl mb-4">Game over</p>}
+
         {initialized ? (
           <div className="bg-card rounded-xl shadow-2xl p-4 mb-8">
             <div className="grid grid-cols-4 gap-2">
@@ -320,81 +321,7 @@ export default function Home() {
           </button>
         </div>
 
-        <div className="mt-4 w-full max-w-md px-4">
-          <h2 className="text-sm font-semibold text-foreground mb-2">
-            FHE Achievements (on-chain ready)
-          </h2>
-
-          {txMessage && (
-            <div className="mb-2 text-[11px] text-foreground/80">{txMessage}</div>
-          )}
-
-          <div className="space-y-2 text-xs text-foreground/80">
-            {achievements.map((ach) => {
-              const levelMeta = TILE_LEVELS.find((l) => l.name === ach.level)!;
-              const disabled = !ach.unlocked || ach.claimed || isClaiming;
-
-              return (
-                <div
-                  key={ach.id}
-                  className="border border-border rounded-lg px-3 py-2 flex items-center justify-between gap-3 bg-card/40"
-                >
-                  <div className="flex flex-col gap-0.5">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${levelMeta.bgClass} ${levelMeta.textClass}`}
-                      >
-                        {levelMeta.label.toUpperCase()}
-                      </span>
-                      <span className="font-semibold text-foreground text-xs">
-                        {ach.title}
-                      </span>
-                    </div>
-                    <span className="text-[11px]">{ach.description}</span>
-                    <span className="text-[10px] text-foreground/60">
-                      Threshold: value ≥ {ach.threshold}
-                    </span>
-                  </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <span
-                      className={
-                        ach.unlocked
-                          ? "text-[10px] text-emerald-500 font-semibold"
-                          : "text-[10px] text-foreground/40"
-                      }
-                    >
-                      {ach.unlocked ? "Unlocked" : "Locked"}
-                    </span>
-                    <button
-                      className="px-2 py-1 rounded-md text-[10px] bg-primary text-primary-foreground disabled:bg-muted disabled:text-foreground/40"
-                      disabled={disabled}
-                      onClick={() => handleClaimAchievement(ach.id)}
-                    >
-                      {ach.claimed
-                        ? "Claimed"
-                        : isClaiming
-                          ? "Claiming..."
-                          : "Claim NFT"}
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <p className="mt-2 text-[10px] text-foreground/60">
-            When connected to Base Sepolia, claiming an achievement will call the
-            on-chain CipherAchievements contract and mint a real NFT. This
-            frontend uses ethers.js to send the transaction from your wallet.
-          </p>
-          <button
-            className="mt-4 w-full py-2 bg-primary text-primary-foreground rounded-md"
-            onClick={connectWallet}
-          >
-            {walletAddress ? `Connected: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : "Connect wallet"}
-          </button>
-        </div>
-      </div>
-              {/* Color Legend */}
+        {/* Color Legend */}
         <div className="flex items-center justify-center gap-6 my-8 flex-wrap">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded bg-slate-700" />
@@ -418,10 +345,70 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Footer Credit */}
+        <div className="mt-4 w-full max-w-md px-4">
+          <h2 className="text-sm font-semibold text-foreground mb-2">
+            FHE Achievements (on-chain ready)
+          </h2>
+
+          {txMessage && (
+            <div className="mb-2 text-[11px] text-foreground/80">{txMessage}</div>
+          )}
+
+          <div className="space-y-2 text-xs text-foreground/80">
+            {achievements.map((ach) => {
+              const levelMeta = TILE_LEVELS.find(l => l.name === ach.level)!;
+              const disabled = !ach.unlocked || ach.claimed || isClaiming;
+
+              return (
+                <div
+                  key={ach.id}
+                  className="border border-border rounded-lg px-3 py-2 flex items-center justify-between gap-3 bg-card/40"
+                >
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${levelMeta.bgClass} ${levelMeta.textClass}`}>
+                        {levelMeta.label.toUpperCase()}
+                      </span>
+                      <span className="font-semibold text-foreground text-xs">{ach.title}</span>
+                    </div>
+                    <span className="text-[11px]">{ach.description}</span>
+                    <span className="text-[10px] text-foreground/60">
+                      Threshold: value ≥ {ach.threshold}
+                    </span>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <span className={ach.unlocked ? "text-[10px] text-emerald-500 font-semibold" : "text-[10px] text-foreground/40"}>
+                      {ach.unlocked ? "Unlocked" : "Locked"}
+                    </span>
+                    <button
+                      className="px-2 py-1 rounded-md text-[10px] bg-primary text-primary-foreground disabled:bg-muted disabled:text-foreground/40"
+                      disabled={disabled}
+                      onClick={() => handleClaimAchievement(ach.id)}
+                    >
+                      {ach.claimed ? "Claimed" : isClaiming ? "Claiming..." : "Claim NFT"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="mt-2 text-[10px] text-foreground/60">
+            When connected to Base Sepolia, claiming an achievement will call the on-chain CipherAchievements contract and mint a real NFT.
+          </p>
+
+          <button
+            className="mt-4 w-full py-2 bg-primary text-primary-foreground rounded-md"
+            onClick={connectWallet}
+          >
+            {walletAddress ? `Connected: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : "Connect wallet"}
+          </button>
+        </div>
+
         <p className="text-center text-foreground/60 text-sm mt-12">
           Made with love by mora
         </p>
+      </div>
     </div>
   );
 }
