@@ -9,4 +9,7 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
+  optimizeDeps: {
+    include: ['cofhejs'], // Pre-bundle cofhejs to avoid resolve errors in dev
+  },
 })

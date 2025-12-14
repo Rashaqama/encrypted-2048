@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { BrowserProvider, Contract } from "ethers";
 import { useFHE } from "../fhe/useFHE";
 
-type CellValue = number | null;
+type EncryptedValue = any; // ciphertext from cofhejs
+type CellValue = EncryptedValue | null;
 type Board = CellValue[][];
 
 type Direction = "left" | "right" | "up" | "down";
@@ -38,11 +39,14 @@ const TILE_LEVELS: TileLevelMeta[] = [
   { name: "legendary", label: "Legendary", bgClass: "bg-amber-500", textClass: "text-amber-50" },
 ];
 
-function getTileLevel(value: number): TileLevelMeta {
-  if (value < 16) return TILE_LEVELS[0];
-  if (value < 128) return TILE_LEVELS[1];
-  if (value < 512) return TILE_LEVELS[2];
-  if (value < 2048) return TILE_LEVELS[3];
+function getTileLevel(encryptedValue: EncryptedValue, client: any): TileLevelMeta {
+  if (!encryptedValue || !client) return TILE_LEVELS[0];
+
+  const plainValue = client.unseal(encryptedValue);
+  if (plainValue < 16) return TILE_LEVELS[0];
+  if (plainValue < 128) return TILE_LEVELS[1];
+  if (plainValue < 512) return TILE_LEVELS[2];
+  if (plainValue < 2048) return TILE_LEVELS[3];
   return TILE_LEVELS[4];
 }
 
@@ -99,9 +103,11 @@ export default function Home() {
   const [isClaiming, setIsClaiming] = useState(false);
   const [txMessage, setTxMessage] = useState<string | null>(null);
 
-  const { initialized } = useFHE();
+  const { client, initialized, error } = useFHE();
 
   const addRandomTile = (board: Board): Board => {
+    if (!client) return board;
+
     const empty: [number, number][] = [];
     for (let i = 0; i < BOARD_SIZE; i++) {
       for (let j = 0; j < BOARD_SIZE; j++) {
@@ -111,48 +117,64 @@ export default function Home() {
     if (empty.length === 0) return board;
     const [r, c] = empty[Math.floor(Math.random() * empty.length)];
     const newBoard = board.map(row => [...row]);
-    newBoard[r][c] = Math.random() < 0.9 ? 2 : 4;
+
+    const plainValue = Math.random() < 0.9 ? 2 : 4;
+    const encrypted = client.encrypt32(plainValue);
+
+    newBoard[r][c] = encrypted;
     return newBoard;
   };
 
   const initializeBoard = () => {
     let newBoard = Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null));
-    newBoard = addRandomTile(addRandomTile(newBoard));
+    if (client) {
+      newBoard = addRandomTile(addRandomTile(newBoard));
+    }
     setBoard(newBoard);
     setScore(0);
     setGameOver(false);
     setAchievements(INITIAL_ACHIEVEMENTS);
   };
 
-  // Slide and merge a row to the left
+  useEffect(() => {
+    if (initialized && client) {
+      initializeBoard();
+    }
+  }, [initialized, client]);
+
+  // Slide and merge (unseal for calculation, then re-encrypt)
   const slideRowLeft = (row: CellValue[]): [CellValue[], number] => {
+    if (!client) return [row, 0];
+
     const filtered = row.filter(v => v !== null);
     let scoreAdd = 0;
+
     for (let j = 0; j < filtered.length - 1; j++) {
-      if (filtered[j] === filtered[j + 1]) {
-        filtered[j] *= 2;
-        scoreAdd += filtered[j];
+      const v1 = client.unseal(filtered[j]);
+      const v2 = client.unseal(filtered[j + 1]);
+      if (v1 === v2) {
+        const merged = client.encrypt32(v1 * 2);
+        filtered[j] = merged;
+        scoreAdd += v1 * 2;
         filtered.splice(j + 1, 1);
         j--;
       }
     }
+
     return [filtered.concat(Array(BOARD_SIZE - filtered.length).fill(null)), scoreAdd];
   };
 
-  // Transpose the board
   const transpose = (board: Board): Board => board[0].map((_, col) => board.map(row => row[col]));
 
-  // Reverse rows
   const reverseRows = (board: Board): Board => board.map(row => row.reverse());
 
   const move = (direction: Direction) => {
-    if (gameOver) return;
+    if (gameOver || !client) return;
 
     let newBoard = board.map(row => [...row]);
     let totalScoreAdd = 0;
     let moved = false;
 
-    // Rotate to make direction "left"
     if (direction === "up") {
       newBoard = transpose(newBoard);
     } else if (direction === "right") {
@@ -161,9 +183,7 @@ export default function Home() {
       newBoard = transpose(newBoard);
       newBoard = reverseRows(newBoard);
     }
-    // left: no rotation
 
-    // Slide left
     for (let i = 0; i < BOARD_SIZE; i++) {
       const [newRow, scoreAdd] = slideRowLeft(newBoard[i]);
       totalScoreAdd += scoreAdd;
@@ -171,7 +191,6 @@ export default function Home() {
       newBoard[i] = newRow;
     }
 
-    // Unrotate to original orientation
     if (direction === "up") {
       newBoard = transpose(newBoard);
     } else if (direction === "right") {
@@ -188,7 +207,10 @@ export default function Home() {
 
       let maxValue = 0;
       newBoard.forEach(row => row.forEach(val => {
-        if (val && val > maxValue) maxValue = val;
+        if (val) {
+          const plain = client.unseal(val);
+          if (plain > maxValue) maxValue = plain;
+        }
       }));
 
       setAchievements(prev => prev.map(ach => {
@@ -205,11 +227,13 @@ export default function Home() {
   };
 
   const isGameOver = (board: Board): boolean => {
+    if (!client) return false;
     for (let i = 0; i < BOARD_SIZE; i++) {
       for (let j = 0; j < BOARD_SIZE; j++) {
         if (board[i][j] === null) return false;
-        if (i < BOARD_SIZE - 1 && board[i][j] === board[i + 1][j]) return false;
-        if (j < BOARD_SIZE - 1 && board[i][j] === board[i][j + 1]) return false;
+        const val = client.unseal(board[i][j]);
+        if (i < BOARD_SIZE - 1 && val === client.unseal(board[i + 1][j])) return false;
+        if (j < BOARD_SIZE - 1 && val === client.unseal(board[i][j + 1])) return false;
       }
     }
     return true;
@@ -262,10 +286,6 @@ export default function Home() {
   };
 
   useEffect(() => {
-    initializeBoard();
-  }, []);
-
-  useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowUp") move("up");
       if (e.key === "ArrowDown") move("down");
@@ -274,7 +294,7 @@ export default function Home() {
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [board, gameOver]);
+  }, [board, gameOver, client]);
 
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
@@ -282,6 +302,7 @@ export default function Home() {
         <h1 className="text-4xl font-bold text-center mb-2">Encrypted 2048 - test</h1>
         <p className="text-center text-muted-foreground mb-8">Score: {score}</p>
         {gameOver && <p className="text-center text-red-500 text-xl mb-4">Game over</p>}
+        {error && <p className="text-center text-red-500 mb-4">{error}</p>}
 
         {initialized ? (
           <div className="bg-card rounded-xl shadow-2xl p-4 mb-8">
@@ -291,7 +312,7 @@ export default function Home() {
                   <div
                     key={`${i}-${j}`}
                     className={`aspect-square rounded-lg flex items-center justify-center text-2xl font-bold transition-all ${
-                      value ? getTileLevel(value).bgClass + " " + getTileLevel(value).textClass : "bg-muted"
+                      value && client ? getTileLevel(value, client).bgClass + " " + getTileLevel(value, client).textClass : "bg-muted"
                     }`}
                   >
                     {""}
