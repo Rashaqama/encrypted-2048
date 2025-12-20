@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { BrowserProvider, Contract } from "ethers";
 import { useFHE } from "../fhe/useFHE";
 
-type EncryptedValue = any; // ciphertext from cofhejs
+type EncryptedValue = any;
 type CellValue = EncryptedValue | null;
 type Board = CellValue[][];
 
@@ -10,7 +10,8 @@ type Direction = "left" | "right" | "up" | "down";
 
 const BOARD_SIZE = 4;
 
-const ACHIEVEMENT_CONTRACT_ADDRESS = "0xDE0c86c1c4607713Fd19e000661Ada864b6c493a";
+const ACHIEVEMENT_CONTRACT_ADDRESS =
+  "0xDE0c86c1c4607713Fd19e000661Ada864b6c493a";
 
 const ACHIEVEMENT_CONTRACT_ABI = [
   {
@@ -105,18 +106,28 @@ export default function Home() {
 
   const { client, initialized, error } = useFHE();
 
-  const addRandomTile = (board: Board): Board => {
-    if (!client) return board;
+  // Prevent page scrolling with arrow keys, and keep the page fixed-height.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+
+  const addRandomTile = (b: Board): Board => {
+    if (!client) return b;
 
     const empty: [number, number][] = [];
     for (let i = 0; i < BOARD_SIZE; i++) {
       for (let j = 0; j < BOARD_SIZE; j++) {
-        if (board[i][j] === null) empty.push([i, j]);
+        if (b[i][j] === null) empty.push([i, j]);
       }
     }
-    if (empty.length === 0) return board;
+    if (empty.length === 0) return b;
+
     const [r, c] = empty[Math.floor(Math.random() * empty.length)];
-    const newBoard = board.map(row => [...row]);
+    const newBoard = b.map((row) => [...row]);
 
     const plainValue = Math.random() < 0.9 ? 2 : 4;
     const encrypted = client.encrypt32(plainValue);
@@ -142,11 +153,10 @@ export default function Home() {
     }
   }, [initialized, client]);
 
-  // Slide and merge (unseal for calculation, then re-encrypt)
   const slideRowLeft = (row: CellValue[]): [CellValue[], number] => {
     if (!client) return [row, 0];
 
-    const filtered = row.filter(v => v !== null);
+    const filtered = row.filter((v) => v !== null);
     let scoreAdd = 0;
 
     for (let j = 0; j < filtered.length - 1; j++) {
@@ -164,14 +174,26 @@ export default function Home() {
     return [filtered.concat(Array(BOARD_SIZE - filtered.length).fill(null)), scoreAdd];
   };
 
-  const transpose = (board: Board): Board => board[0].map((_, col) => board.map(row => row[col]));
+  const transpose = (b: Board): Board => b[0].map((_, col) => b.map((row) => row[col]));
+  const reverseRows = (b: Board): Board => b.map((row) => row.reverse());
 
-  const reverseRows = (board: Board): Board => board.map(row => row.reverse());
+  const isGameOver = (b: Board): boolean => {
+    if (!client) return false;
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      for (let j = 0; j < BOARD_SIZE; j++) {
+        if (b[i][j] === null) return false;
+        const val = client.unseal(b[i][j]);
+        if (i < BOARD_SIZE - 1 && val === client.unseal(b[i + 1][j])) return false;
+        if (j < BOARD_SIZE - 1 && val === client.unseal(b[i][j + 1])) return false;
+      }
+    }
+    return true;
+  };
 
   const move = (direction: Direction) => {
-    if (gameOver || !client) return;
+    if (gameOver || !client || !initialized) return;
 
-    let newBoard = board.map(row => [...row]);
+    let newBoard = board.map((row) => [...row]);
     let totalScoreAdd = 0;
     let moved = false;
 
@@ -203,40 +225,31 @@ export default function Home() {
     if (moved) {
       newBoard = addRandomTile(newBoard);
       setBoard(newBoard);
-      setScore(prev => prev + totalScoreAdd);
+      setScore((prev) => prev + totalScoreAdd);
 
       let maxValue = 0;
-      newBoard.forEach(row => row.forEach(val => {
-        if (val) {
-          const plain = client.unseal(val);
-          if (plain > maxValue) maxValue = plain;
-        }
-      }));
+      newBoard.forEach((row) =>
+        row.forEach((val) => {
+          if (val) {
+            const plain = client.unseal(val);
+            if (plain > maxValue) maxValue = plain;
+          }
+        })
+      );
 
-      setAchievements(prev => prev.map(ach => {
-        if (!ach.unlocked && maxValue >= ach.threshold) {
-          return { ...ach, unlocked: true };
-        }
-        return ach;
-      }));
+      setAchievements((prev) =>
+        prev.map((ach) => {
+          if (!ach.unlocked && maxValue >= ach.threshold) {
+            return { ...ach, unlocked: true };
+          }
+          return ach;
+        })
+      );
 
       if (isGameOver(newBoard)) {
         setGameOver(true);
       }
     }
-  };
-
-  const isGameOver = (board: Board): boolean => {
-    if (!client) return false;
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      for (let j = 0; j < BOARD_SIZE; j++) {
-        if (board[i][j] === null) return false;
-        const val = client.unseal(board[i][j]);
-        if (i < BOARD_SIZE - 1 && val === client.unseal(board[i + 1][j])) return false;
-        if (j < BOARD_SIZE - 1 && val === client.unseal(board[i][j + 1])) return false;
-      }
-    }
-    return true;
   };
 
   const handleClaimAchievement = async (id: AchievementId) => {
@@ -251,7 +264,11 @@ export default function Home() {
       const provider = new BrowserProvider((window as any).ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
-      const contract = new Contract(ACHIEVEMENT_CONTRACT_ADDRESS, ACHIEVEMENT_CONTRACT_ABI, signer);
+      const contract = new Contract(
+        ACHIEVEMENT_CONTRACT_ADDRESS,
+        ACHIEVEMENT_CONTRACT_ABI,
+        signer
+      );
 
       const levelIndex = id === "medium_power" ? 0 : id === "big_power" ? 1 : 2;
 
@@ -260,7 +277,9 @@ export default function Home() {
       await tx.wait();
       setTxMessage("NFT minted successfully!");
 
-      setAchievements(prev => prev.map(ach => ach.id === id ? { ...ach, claimed: true } : ach));
+      setAchievements((prev) =>
+        prev.map((ach) => (ach.id === id ? { ...ach, claimed: true } : ach))
+      );
     } catch (err: any) {
       setTxMessage(`Error: ${err.message || "Unknown"}`);
       console.error(err);
@@ -285,99 +304,128 @@ export default function Home() {
     }
   };
 
+  const disconnectWallet = () => {
+    setWalletAddress(null);
+    setTxMessage(null);
+  };
+
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+      }
       if (e.key === "ArrowUp") move("up");
       if (e.key === "ArrowDown") move("down");
       if (e.key === "ArrowLeft") move("left");
       if (e.key === "ArrowRight") move("right");
     };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [board, gameOver, client]);
+
+    // Must be passive: false so preventDefault works for arrow keys
+    window.addEventListener("keydown", handleKey, { passive: false } as any);
+    return () => window.removeEventListener("keydown", handleKey as any);
+  }, [board, gameOver, client, initialized]);
+
+  const canPlay = initialized && !!client && !gameOver;
 
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
-      <div className="max-w-md w-full">
-        <h1 className="text-4xl font-bold text-center mb-2">Encrypted 2048 - test</h1>
-        <p className="text-center text-muted-foreground mb-8">Score: {score}</p>
-        {gameOver && <p className="text-center text-red-500 text-xl mb-4">Game over</p>}
-        {error && <p className="text-center text-red-500 mb-4">{error}</p>}
+    <div className="h-[100dvh] overflow-hidden bg-background flex flex-col items-center justify-center px-4 py-3">
+      <div className="w-full max-w-md flex flex-col items-center gap-3 pb-10">
+        <div className="w-full">
+          <h1 className="text-4xl font-bold text-center">Encrypted 2048 - test</h1>
+          <p className="text-center text-muted-foreground">Score: {score}</p>
+          {gameOver && <p className="text-center text-red-500 text-xl mt-1">Game over</p>}
+          {error && <p className="text-center text-red-500 mt-1">{error}</p>}
+          {!initialized && <p className="text-center text-foreground/70 mt-1">Loading FHE...</p>}
+        </div>
 
-        {initialized ? (
-          <div className="bg-card rounded-xl shadow-2xl p-4 mb-8">
-            <div className="grid grid-cols-4 gap-2">
-              {board.map((row, i) =>
-                row.map((value, j) => (
-                  <div
-                    key={`${i}-${j}`}
-                    className={`aspect-square rounded-lg flex items-center justify-center text-2xl font-bold transition-all ${
-                      value && client ? getTileLevel(value, client).bgClass + " " + getTileLevel(value, client).textClass : "bg-muted"
-                    }`}
-                  >
-                    {""}
-                  </div>
-                ))
-              )}
-            </div>
+        {/* Board always renders to keep layout stable; it becomes playable when initialized */}
+        <div className="w-full bg-card rounded-xl shadow-2xl p-4">
+          <div className="grid grid-cols-4 gap-2">
+            {board.map((row, i) =>
+              row.map((value, j) => (
+                <div
+                  key={`${i}-${j}`}
+                  className={`aspect-square rounded-lg flex items-center justify-center text-2xl font-bold transition-all ${
+                    value && client
+                      ? getTileLevel(value, client).bgClass + " " + getTileLevel(value, client).textClass
+                      : "bg-muted"
+                  }`}
+                >
+                  {""}
+                </div>
+              ))
+            )}
           </div>
-        ) : (
-          <p className="text-center">Loading FHE...</p>
-        )}
+        </div>
 
-        <div className="grid grid-cols-3 gap-4 mb-8">
+        <div className="grid grid-cols-3 gap-3 w-full">
           <div />
-          <button className="bg-primary text-primary-foreground rounded-lg py-4 font-semibold" onClick={() => move("up")}>
+          <button
+            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
+            onClick={() => move("up")}
+            disabled={!canPlay}
+          >
             Up
           </button>
           <div />
-          <button className="bg-primary text-primary-foreground rounded-lg py-4 font-semibold" onClick={() => move("left")}>
+          <button
+            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
+            onClick={() => move("left")}
+            disabled={!canPlay}
+          >
             Left
           </button>
-          <button className="bg-primary text-primary-foreground rounded-lg py-4 font-semibold" onClick={() => move("down")}>
+          <button
+            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
+            onClick={() => move("down")}
+            disabled={!canPlay}
+          >
             Down
           </button>
-          <button className="bg-primary text-primary-foreground rounded-lg py-4 font-semibold" onClick={() => move("right")}>
+          <button
+            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
+            onClick={() => move("right")}
+            disabled={!canPlay}
+          >
             Right
           </button>
         </div>
 
         {/* Color Legend */}
-        <div className="flex items-center justify-center gap-6 my-8 flex-wrap">
+        <div className="flex items-center justify-center gap-4 flex-wrap">
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-slate-700" />
-            <span className="text-sm text-foreground/80">Tiny</span>
+            <div className="w-5 h-5 rounded bg-slate-700" />
+            <span className="text-xs text-foreground/80">Tiny</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-blue-600" />
-            <span className="text-sm text-foreground/80">Small</span>
+            <div className="w-5 h-5 rounded bg-blue-600" />
+            <span className="text-xs text-foreground/80">Small</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-emerald-500" />
-            <span className="text-sm text-foreground/80">Medium</span>
+            <div className="w-5 h-5 rounded bg-emerald-500" />
+            <span className="text-xs text-foreground/80">Medium</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-violet-500" />
-            <span className="text-sm text-foreground/80">Big</span>
+            <div className="w-5 h-5 rounded bg-violet-500" />
+            <span className="text-xs text-foreground/80">Big</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-amber-500" />
-            <span className="text-sm text-foreground/80">Legendary</span>
+            <div className="w-5 h-5 rounded bg-amber-500" />
+            <span className="text-xs text-foreground/80">Legendary</span>
           </div>
         </div>
 
-        <div className="mt-4 w-full max-w-md px-4">
-          <h2 className="text-sm font-semibold text-foreground mb-2">
+        {/* Achievements area with internal scrolling to avoid page scrolling */}
+        <div className="w-full px-1">
+          <h2 className="text-xs font-semibold text-foreground mb-2">
             FHE Achievements (on-chain ready)
           </h2>
 
-          {txMessage && (
-            <div className="mb-2 text-[11px] text-foreground/80">{txMessage}</div>
-          )}
+          {txMessage && <div className="mb-2 text-[11px] text-foreground/80">{txMessage}</div>}
 
-          <div className="space-y-2 text-xs text-foreground/80">
+          <div className="space-y-2 text-xs text-foreground/80 max-h-44 overflow-auto pr-1">
             {achievements.map((ach) => {
-              const levelMeta = TILE_LEVELS.find(l => l.name === ach.level)!;
+              const levelMeta = TILE_LEVELS.find((l) => l.name === ach.level)!;
               const disabled = !ach.unlocked || ach.claimed || isClaiming;
 
               return (
@@ -387,7 +435,9 @@ export default function Home() {
                 >
                   <div className="flex flex-col gap-0.5">
                     <div className="flex items-center gap-2">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${levelMeta.bgClass} ${levelMeta.textClass}`}>
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${levelMeta.bgClass} ${levelMeta.textClass}`}
+                      >
                         {levelMeta.label.toUpperCase()}
                       </span>
                       <span className="font-semibold text-foreground text-xs">{ach.title}</span>
@@ -398,7 +448,13 @@ export default function Home() {
                     </span>
                   </div>
                   <div className="flex flex-col items-end gap-1">
-                    <span className={ach.unlocked ? "text-[10px] text-emerald-500 font-semibold" : "text-[10px] text-foreground/40"}>
+                    <span
+                      className={
+                        ach.unlocked
+                          ? "text-[10px] text-emerald-500 font-semibold"
+                          : "text-[10px] text-foreground/40"
+                      }
+                    >
                       {ach.unlocked ? "Unlocked" : "Locked"}
                     </span>
                     <button
@@ -418,18 +474,31 @@ export default function Home() {
             When connected to Base Sepolia, claiming an achievement will call the on-chain CipherAchievements contract and mint a real NFT.
           </p>
 
-          <button
-            className="mt-4 w-full py-2 bg-primary text-primary-foreground rounded-md"
-            onClick={connectWallet}
-          >
-            {walletAddress ? `Connected: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : "Connect wallet"}
-          </button>
-        </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              className="flex-1 py-2 bg-primary text-primary-foreground rounded-md"
+              onClick={connectWallet}
+            >
+              {walletAddress
+                ? `Connected: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+                : "Connect wallet"}
+            </button>
 
-        <p className="text-center text-foreground/60 text-sm mt-12">
-          Made with love by mora
-        </p>
+            <button
+              className="py-2 px-3 rounded-md border border-border bg-background text-foreground disabled:opacity-50"
+              onClick={disconnectWallet}
+              disabled={!walletAddress}
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
       </div>
+
+      {/* Fixed footer so it never causes page scroll */}
+      <p className="fixed bottom-3 left-0 right-0 text-center text-foreground/60 text-sm">
+        Made with love by mora
+      </p>
     </div>
   );
 }
