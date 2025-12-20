@@ -6,33 +6,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Encrypted 2048</title>
 
-    <!-- Load CoFHE from CDN -->
+    <!-- Load CoFHE from CDN (browser entry). Block app start until this finishes. -->
     <script type="module">
-      (async () => {
-        try {
-          // Use bundling so bare imports (e.g. "tweetnacl") are resolved for the browser.
-          const mod = await import("https://esm.sh/cofhejs@0.3.1/dist/web.mjs?bundle");
+      try {
+        const mod = await import("https://esm.sh/cofhejs@0.3.1/web?bundle");
 
-          // Try multiple export shapes to be resilient to CDN/module wrapping differences.
-          const CoFHE =
-            mod.CoFHE ??
-            mod.default?.CoFHE ??
-            mod.default ??
-            null;
+        // Different builds may expose different export names.
+        const cofhe =
+          mod.CoFHE ??
+          mod.cofhejs ??
+          mod.default?.CoFHE ??
+          mod.default?.cofhejs ??
+          null;
 
-          if (!CoFHE) {
-            throw new Error("CoFHE export was not found on the loaded module");
-          }
+        window.CoFHE = cofhe;
+        window.cofhejs = cofhe;
+        window.Encryptable = mod.Encryptable ?? mod.default?.Encryptable ?? null;
 
-          window.CoFHE = CoFHE;
-          window.__COFHE_STATUS__ = "loaded";
-          console.log("✅ CoFHE loaded from CDN");
-        } catch (e) {
-          window.CoFHE = null;
-          window.__COFHE_STATUS__ = "failed";
-          console.error("❌ Failed to load CoFHE from CDN", e);
-        }
-      })();
+        window.__COFHE_STATUS__ = cofhe ? "loaded" : "missing-export";
+        console.log("✅ CoFHE loaded from CDN", window.__COFHE_STATUS__, {
+          hasEncryptable: !!window.Encryptable,
+        });
+      } catch (e) {
+        console.error("❌ Failed to load CoFHE from CDN", e);
+        window.CoFHE = null;
+        window.cofhejs = null;
+        window.Encryptable = null;
+        window.__COFHE_STATUS__ = "failed";
+      }
     </script>
   </head>
 
