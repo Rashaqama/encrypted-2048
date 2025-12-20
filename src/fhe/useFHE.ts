@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 declare global {
   interface Window {
+    // Loaded by index.html
     cofhejs?: any;
     CoFHE?: any;
     Encryptable?: any;
@@ -26,17 +27,35 @@ type InitArgs = {
 };
 
 function getCofheSdk(): any | null {
-  // Prefer the official "cofhejs" namespace if present.
+  // Prefer explicit global
   if (window.cofhejs) return window.cofhejs;
 
-  // Backwards compatibility if older code stored it here.
-  if (window.CoFHE) return window.CoFHE;
+  // If index.html exposed the full module as window.CoFHE, it may contain cofhejs
+  if (window.CoFHE?.cofhejs) return window.CoFHE.cofhejs;
 
   return null;
 }
 
 function getEncryptable(): any | null {
-  return window.Encryptable ?? null;
+  if (window.Encryptable) return window.Encryptable;
+  if (window.CoFHE?.Encryptable) return window.CoFHE.Encryptable;
+  return null;
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let t: number | undefined;
+
+  const timeout = new Promise<T>((_, reject) => {
+    t = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (t !== undefined) window.clearTimeout(t);
+  }
 }
 
 export function useFHE() {
@@ -47,28 +66,49 @@ export function useFHE() {
   const Encryptable = useMemo(() => getEncryptable(), [status]);
 
   useEffect(() => {
-    const hasCdn = window.__COFHE_STATUS__ === "loaded";
-    const hasSdk = !!getCofheSdk();
-    const hasEncryptable = !!getEncryptable();
+    let cancelled = false;
 
-    if (hasCdn && hasSdk && hasEncryptable) {
-      setStatus("cdn-loaded");
-      console.log("✅ CoFHE CDN is loaded and globals are available", {
-        hasSdk,
-        hasEncryptable,
-      });
-      return;
-    }
+    const tick = () => {
+      if (cancelled) return;
 
-    // CDN loader sets __COFHE_STATUS__ to "failed" on error.
-    if (window.__COFHE_STATUS__ === "failed") {
-      setStatus("cdn-missing");
-      console.warn("⚠️ CoFHE CDN failed to load. App will use mock mode.");
-      return;
-    }
+      const cdnStatus = window.__COFHE_STATUS__;
+      const hasSdk = !!getCofheSdk();
+      const hasEncryptable = !!getEncryptable();
 
-    // If neither loaded nor failed, keep booting briefly.
-    setStatus("booting");
+      if (cdnStatus === "loaded") {
+        if (hasSdk && hasEncryptable) {
+          setStatus("cdn-loaded");
+          console.log("✅ CoFHE CDN is loaded and globals are available", {
+            hasSdk,
+            hasEncryptable,
+          });
+        } else {
+          // CDN loaded, but globals are incomplete; still treat as loaded
+          setStatus("cdn-loaded");
+          console.warn("⚠️ CoFHE CDN loaded, but some globals are missing", {
+            hasSdk,
+            hasEncryptable,
+          });
+        }
+        return;
+      }
+
+      if (cdnStatus === "failed") {
+        setStatus("cdn-missing");
+        console.warn("⚠️ CoFHE CDN failed to load. App can use mock mode.");
+        return;
+      }
+
+      // Keep booting until index.html finishes
+      setStatus("booting");
+      window.setTimeout(tick, 200);
+    };
+
+    tick();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const initWithEthers = useCallback(async (args: InitArgs) => {
@@ -77,8 +117,8 @@ export function useFHE() {
     const currentSdk = getCofheSdk();
     if (!currentSdk) {
       setStatus("mock");
-      setError("CoFHE SDK is not available on window.");
-      console.warn("⚠️ No CoFHE SDK found on window. Using mock mode.");
+      setError("cofhejs SDK is not available on window.");
+      console.warn("⚠️ cofhejs SDK not found. Using mock mode.");
       return false;
     }
 
@@ -89,9 +129,9 @@ export function useFHE() {
     }
 
     if (typeof currentSdk.initializeWithEthers !== "function") {
-      setStatus("error");
-      setError("initializeWithEthers is not available on the loaded SDK.");
-      console.error("❌ Loaded SDK does not expose initializeWithEthers", {
+      setStatus("mock");
+      setError("initializeWithEthers is not available on cofhejs SDK.");
+      console.error("❌ cofhejs SDK does not expose initializeWithEthers", {
         keys: Object.keys(currentSdk ?? {}),
       });
       return false;
@@ -99,20 +139,26 @@ export function useFHE() {
 
     try {
       setStatus("initializing");
+      console.log("🔄 Initializing cofhejs...");
 
-      await currentSdk.initializeWithEthers({
-        ethersProvider: args.provider,
-        ethersSigner: args.signer,
-        environment: args.environment ?? "TESTNET",
-      });
+      await withTimeout(
+        currentSdk.initializeWithEthers({
+          ethersProvider: args.provider,
+          ethersSigner: args.signer,
+          environment: args.environment ?? "TESTNET",
+        }),
+        20000,
+        "cofhejs.initializeWithEthers"
+      );
 
       setStatus("ready");
       console.log("✅ CoFHE initialized successfully");
       return true;
     } catch (e: any) {
-      setStatus("error");
+      // Never get stuck on loading
+      setStatus("mock");
       setError(e?.message ?? String(e));
-      console.error("❌ CoFHE initialization failed", e);
+      console.error("❌ CoFHE initialization failed; switching to mock mode", e);
       return false;
     }
   }, []);
@@ -122,7 +168,7 @@ export function useFHE() {
       const currentSdk = getCofheSdk();
       const currentEncryptable = getEncryptable();
 
-      // If not ready, fall back to mock behavior (but do NOT claim CDN failed).
+      // If not ready, fall back to mock behavior
       if (
         status !== "ready" ||
         !currentSdk ||
@@ -133,10 +179,7 @@ export function useFHE() {
         return { mode: "mock" as const, data: value };
       }
 
-      const result = await currentSdk.encrypt(
-        [currentEncryptable.uint32(value)],
-        onState
-      );
+      const result = await currentSdk.encrypt([currentEncryptable.uint32(value)], onState);
 
       const encrypted = result?.data?.[0];
       if (!encrypted) {

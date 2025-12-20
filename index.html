@@ -6,34 +6,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Encrypted 2048</title>
 
-    <!-- Load CoFHE from CDN (browser entry). Block app start until this finishes. -->
+    <!-- Load CoFHE/cofhejs SDK from CDN -->
     <script type="module">
-      try {
-        const mod = await import("https://esm.sh/cofhejs@0.3.1/web?bundle");
+      (async () => {
+        try {
+          const mod = await import("https://esm.sh/cofhejs@0.3.1/dist/web.mjs");
 
-        // Different builds may expose different export names.
-        const cofhe =
-          mod.CoFHE ??
-          mod.cofhejs ??
-          mod.default?.CoFHE ??
-          mod.default?.cofhejs ??
-          null;
+          // Expose the whole SDK module for maximum compatibility
+          window.CoFHE = mod;
 
-        window.CoFHE = cofhe;
-        window.cofhejs = cofhe;
-        window.Encryptable = mod.Encryptable ?? mod.default?.Encryptable ?? null;
+          // Also expose common named exports directly (some code expects these)
+          window.cofhejs = mod.cofhejs ?? null;
+          window.Encryptable = mod.Encryptable ?? null;
 
-        window.__COFHE_STATUS__ = cofhe ? "loaded" : "missing-export";
-        console.log("✅ CoFHE loaded from CDN", window.__COFHE_STATUS__, {
-          hasEncryptable: !!window.Encryptable,
-        });
-      } catch (e) {
-        console.error("❌ Failed to load CoFHE from CDN", e);
-        window.CoFHE = null;
-        window.cofhejs = null;
-        window.Encryptable = null;
-        window.__COFHE_STATUS__ = "failed";
-      }
+          // A tiny status flag for debugging
+          window.__COFHE_STATUS__ = "loaded";
+
+          console.log("✅ CoFHE SDK loaded from CDN", {
+            hasCofhejs: !!window.cofhejs,
+            hasEncryptable: !!window.Encryptable,
+          });
+        } catch (e) {
+          window.CoFHE = null;
+          window.cofhejs = null;
+          window.Encryptable = null;
+          window.__COFHE_STATUS__ = "failed";
+
+          console.error("❌ Failed to load CoFHE SDK from CDN", e);
+        }
+      })();
     </script>
   </head>
 
