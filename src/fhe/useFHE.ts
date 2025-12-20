@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 declare global {
   interface Window {
-    // Loaded by index.html
     cofhejs?: any;
     CoFHE?: any;
     Encryptable?: any;
+    FheTypes?: any;
     __COFHE_STATUS__?: string;
   }
 }
@@ -16,6 +16,7 @@ type FHEStatus =
   | "cdn-loaded"
   | "needs-wallet"
   | "initializing"
+  | "permit-needed"
   | "ready"
   | "mock"
   | "error";
@@ -23,16 +24,13 @@ type FHEStatus =
 type InitArgs = {
   provider: any;
   signer: any;
+  issuer?: string;
   environment?: "TESTNET" | "LOCAL" | "MAINNET";
 };
 
-function getCofheSdk(): any | null {
-  // Prefer explicit global
+function getCofhejs(): any | null {
   if (window.cofhejs) return window.cofhejs;
-
-  // If index.html exposed the full module as window.CoFHE, it may contain cofhejs
   if (window.CoFHE?.cofhejs) return window.CoFHE.cofhejs;
-
   return null;
 }
 
@@ -42,13 +40,17 @@ function getEncryptable(): any | null {
   return null;
 }
 
+function getFheTypes(): any | null {
+  if (window.FheTypes) return window.FheTypes;
+  if (window.CoFHE?.FheTypes) return window.CoFHE.FheTypes;
+  return null;
+}
+
 async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   let t: number | undefined;
 
   const timeout = new Promise<T>((_, reject) => {
-    t = window.setTimeout(() => {
-      reject(new Error(`${label} timed out after ${ms}ms`));
-    }, ms);
+    t = window.setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
   });
 
   try {
@@ -61,10 +63,13 @@ async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise
 export function useFHE() {
   const [status, setStatus] = useState<FHEStatus>("booting");
   const [error, setError] = useState<string | null>(null);
+  const [hasPermit, setHasPermit] = useState(false);
 
-  const sdk = useMemo(() => getCofheSdk(), [status]);
+  const cofhejs = useMemo(() => getCofhejs(), [status]);
   const Encryptable = useMemo(() => getEncryptable(), [status]);
+  const FheTypes = useMemo(() => getFheTypes(), [status]);
 
+  // Detect CDN readiness (do not block UI forever)
   useEffect(() => {
     let cancelled = false;
 
@@ -72,22 +77,20 @@ export function useFHE() {
       if (cancelled) return;
 
       const cdnStatus = window.__COFHE_STATUS__;
-      const hasSdk = !!getCofheSdk();
-      const hasEncryptable = !!getEncryptable();
+      const hasSdk = !!getCofhejs();
+      const hasEnc = !!getEncryptable();
 
       if (cdnStatus === "loaded") {
-        if (hasSdk && hasEncryptable) {
-          setStatus("cdn-loaded");
+        setStatus("cdn-loaded");
+        if (hasSdk && hasEnc) {
           console.log("✅ CoFHE CDN is loaded and globals are available", {
-            hasSdk,
-            hasEncryptable,
+            hasSdk: true,
+            hasEncryptable: true,
           });
         } else {
-          // CDN loaded, but globals are incomplete; still treat as loaded
-          setStatus("cdn-loaded");
-          console.warn("⚠️ CoFHE CDN loaded, but some globals are missing", {
+          console.warn("⚠️ CoFHE CDN loaded but globals are incomplete", {
             hasSdk,
-            hasEncryptable,
+            hasEncryptable: hasEnc,
           });
         }
         return;
@@ -99,106 +102,153 @@ export function useFHE() {
         return;
       }
 
-      // Keep booting until index.html finishes
       setStatus("booting");
       window.setTimeout(tick, 200);
     };
 
     tick();
-
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const initWithEthers = useCallback(async (args: InitArgs) => {
+  // Step 1: Initialize cofhejs (no automatic permit prompt)
+  const initCoFHE = useCallback(async (args: InitArgs) => {
     setError(null);
 
-    const currentSdk = getCofheSdk();
-    if (!currentSdk) {
+    const sdk = getCofhejs();
+    if (!sdk) {
       setStatus("mock");
       setError("cofhejs SDK is not available on window.");
-      console.warn("⚠️ cofhejs SDK not found. Using mock mode.");
       return false;
     }
 
     if (!args?.provider || !args?.signer) {
       setStatus("needs-wallet");
-      console.warn("🔌 Wallet/provider missing. CoFHE cannot initialize yet.");
       return false;
     }
 
-    if (typeof currentSdk.initializeWithEthers !== "function") {
+    if (typeof sdk.initializeWithEthers !== "function") {
       setStatus("mock");
       setError("initializeWithEthers is not available on cofhejs SDK.");
-      console.error("❌ cofhejs SDK does not expose initializeWithEthers", {
-        keys: Object.keys(currentSdk ?? {}),
-      });
       return false;
     }
 
     try {
       setStatus("initializing");
-      console.log("🔄 Initializing cofhejs...");
 
       await withTimeout(
-        currentSdk.initializeWithEthers({
+        sdk.initializeWithEthers({
           ethersProvider: args.provider,
           ethersSigner: args.signer,
           environment: args.environment ?? "TESTNET",
+          generatePermit: false,
         }),
         20000,
         "cofhejs.initializeWithEthers"
       );
 
-      setStatus("ready");
-      console.log("✅ CoFHE initialized successfully");
+      setStatus("permit-needed");
+      console.log("✅ cofhejs initialized (permit not generated yet)");
       return true;
     } catch (e: any) {
-      // Never get stuck on loading
       setStatus("mock");
       setError(e?.message ?? String(e));
-      console.error("❌ CoFHE initialization failed; switching to mock mode", e);
+      console.error("❌ cofhejs init failed; switching to mock mode", e);
       return false;
     }
   }, []);
 
-  const encryptUint32 = useCallback(
-    async (value: number, onState?: (s: string) => void) => {
-      const currentSdk = getCofheSdk();
-      const currentEncryptable = getEncryptable();
+  // Step 2: Create permit manually (button-driven UX)
+  const generatePermit = useCallback(async (issuer: string) => {
+    setError(null);
 
-      // If not ready, fall back to mock behavior
-      if (
-        status !== "ready" ||
-        !currentSdk ||
-        typeof currentSdk.encrypt !== "function" ||
-        !currentEncryptable ||
-        typeof currentEncryptable.uint32 !== "function"
-      ) {
-        return { mode: "mock" as const, data: value };
+    const sdk = getCofhejs();
+    if (!sdk || typeof sdk.createPermit !== "function") {
+      setStatus("mock");
+      setError("createPermit is not available on cofhejs SDK.");
+      return false;
+    }
+
+    try {
+      setStatus("permit-needed");
+
+      // 24 hours expiration (recommended in docs)
+      const expiration = Math.round(Date.now() / 1000) + 24 * 60 * 60;
+
+      const result = await withTimeout(
+        sdk.createPermit({
+          type: "self",
+          name: "Encrypted 2048",
+          issuer,
+          expiration,
+        }),
+        20000,
+        "cofhejs.createPermit"
+      );
+
+      if (result && typeof result === "object" && "success" in result) {
+        if (!result.success) {
+          throw new Error(result.error || "Permit creation failed");
+        }
       }
 
-      const result = await currentSdk.encrypt([currentEncryptable.uint32(value)], onState);
+      setHasPermit(true);
+      setStatus("ready");
+      console.log("✅ Permit generated successfully");
+      return true;
+    } catch (e: any) {
+      setHasPermit(false);
+      setStatus("permit-needed");
+      setError(e?.message ?? String(e));
+      console.error("❌ Permit generation failed", e);
+      return false;
+    }
+  }, []);
 
-      const encrypted = result?.data?.[0];
-      if (!encrypted) {
-        throw new Error("Encryption returned empty result.data[0].");
-      }
+  // A compatibility client for your game logic
+  const client = useMemo(() => {
+    const sdk = getCofhejs();
+    const enc = getEncryptable();
+    const types = getFheTypes();
 
-      return { mode: "cofhe" as const, data: encrypted };
-    },
-    [status]
-  );
+    const mock = {
+      encrypt32: (v: number) => v,
+      unseal: (x: any) => Number(x ?? 0),
+    };
+
+    if (status !== "ready" || !sdk || !enc || !types) {
+      return mock;
+    }
+
+    return {
+      encrypt32: async (v: number, onState?: (s: string) => void) => {
+        const out = await sdk.encrypt([enc.uint32(BigInt(v))], onState);
+        return out?.data?.[0];
+      },
+      unseal: async (encryptedHandle: any) => {
+        // Decrypt encrypted handle off-chain (requires permit)
+        const res = await sdk.decrypt(encryptedHandle, types.Uint32);
+        if (res && typeof res === "object" && "success" in res) {
+          if (!res.success) throw new Error(res.error || "Decrypt failed");
+          return Number(res.data);
+        }
+        return Number(res);
+      },
+    };
+  }, [status]);
 
   return {
     status,
     error,
-    sdk,
+    cofhejs,
     Encryptable,
-    initWithEthers,
-    encryptUint32,
-    isReady: status === "ready",
+    FheTypes,
+    hasPermit,
+    initCoFHE,
+    generatePermit,
+    client,
+    initialized: status === "ready",
     isCdnLoaded: window.__COFHE_STATUS__ === "loaded",
   };
 }
