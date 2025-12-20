@@ -2,11 +2,23 @@ import { useEffect, useMemo, useState } from "react";
 import { BrowserProvider, Contract } from "ethers";
 import { useFHE } from "../fhe/useFHE";
 
+declare global {
+  interface Window {
+    ethereum?: any;
+    cofhejs?: any;
+  }
+}
+
 type EncryptedValue = any;
 type CellValue = EncryptedValue | null;
 type Board = CellValue[][];
 
 type Direction = "left" | "right" | "up" | "down";
+
+const BASE_SEPOLIA_CHAIN_ID = 84532; // 0x14a34
+const ARB_SEPOLIA_CHAIN_ID = 421614; // 0x66eee
+const BASE_SEPOLIA_CHAIN_HEX = "0x14a34";
+const ARB_SEPOLIA_CHAIN_HEX = "0x66eee";
 
 const BOARD_SIZE = 4;
 
@@ -82,8 +94,76 @@ function getTileLevel(value: number): TileLevelName {
   return "Tiny";
 }
 
+function getEthereum() {
+  return (window as any).ethereum as any | undefined;
+}
+
+async function switchChain(chainIdHex: string) {
+  const eth = getEthereum();
+  if (!eth?.request) throw new Error("Wallet does not support chain switching.");
+
+  try {
+    await eth.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: chainIdHex }],
+    });
+  } catch (e: any) {
+    // If chain is not added yet, add it then switch
+    if (e?.code === 4902 && chainIdHex === ARB_SEPOLIA_CHAIN_HEX) {
+      await eth.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: ARB_SEPOLIA_CHAIN_HEX,
+            chainName: "Arbitrum Sepolia",
+            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+            rpcUrls: ["https://sepolia-rollup.arbitrum.io/rpc"],
+            blockExplorerUrls: ["https://sepolia.arbiscan.io"],
+          },
+        ],
+      });
+
+      await eth.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: ARB_SEPOLIA_CHAIN_HEX }],
+      });
+      return;
+    }
+
+    if (e?.code === 4902 && chainIdHex === BASE_SEPOLIA_CHAIN_HEX) {
+      await eth.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: BASE_SEPOLIA_CHAIN_HEX,
+            chainName: "Base Sepolia",
+            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+            rpcUrls: ["https://sepolia.base.org"],
+            blockExplorerUrls: ["https://sepolia.basescan.org"],
+          },
+        ],
+      });
+
+      await eth.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: BASE_SEPOLIA_CHAIN_HEX }],
+      });
+      return;
+    }
+
+    throw e;
+  }
+}
+
+async function getChainIdHex(): Promise<string> {
+  const eth = getEthereum();
+  if (!eth?.request) return BASE_SEPOLIA_CHAIN_HEX;
+  const id = await eth.request({ method: "eth_chainId" });
+  return typeof id === "string" ? id : BASE_SEPOLIA_CHAIN_HEX;
+}
+
 export default function Home() {
-  const { client, initialized, status, error, initWithEthers, createSelfPermit, resetPermit } = useFHE();
+  const { client, initialized, status, error, initWithEthers, resetPermit } = useFHE();
 
   const [board, setBoard] = useState<Board>(
     Array(BOARD_SIZE)
@@ -100,8 +180,9 @@ export default function Home() {
   const [achievements, setAchievements] = useState<Achievement[]>(INITIAL_ACHIEVEMENTS);
 
   const canEnableFhe = useMemo(() => {
-    return !!walletAddress && (status === "cdn-loaded" || status === "permit-required" || status === "error");
-  }, [walletAddress, status]);
+    // Allow user to click; we handle connect inside enableFHE.
+    return status !== "booting" && status !== "cdn-missing";
+  }, [status]);
 
   const addRandomTile = (b: Board): Board => {
     const empty: [number, number][] = [];
@@ -173,13 +254,24 @@ export default function Home() {
     return rotated;
   };
 
+  const isGameOver = (b: Board): boolean => {
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      for (let j = 0; j < BOARD_SIZE; j++) {
+        if (b[i][j] === null) return false;
+        const val = client.unseal(b[i][j]);
+        if (i < BOARD_SIZE - 1 && val === client.unseal(b[i + 1][j])) return false;
+        if (j < BOARD_SIZE - 1 && val === client.unseal(b[i][j + 1])) return false;
+      }
+    }
+    return true;
+  };
+
   const move = (dir: Direction) => {
     if (gameOver) return;
 
     let newBoard = board.map((row) => [...row]);
 
-    const rotateTimes =
-      dir === "left" ? 0 : dir === "up" ? 3 : dir === "right" ? 2 : 1;
+    const rotateTimes = dir === "left" ? 0 : dir === "up" ? 3 : dir === "right" ? 2 : 1;
 
     for (let k = 0; k < rotateTimes; k++) newBoard = rotateBoardRight(newBoard);
 
@@ -191,7 +283,7 @@ export default function Home() {
     });
 
     for (let k = 0; k < (4 - rotateTimes) % 4; k++) {
-      // rotate back left (3 rights)
+      // Rotate left by doing 3 right rotations
       movedBoard = rotateBoardRight(movedBoard);
       movedBoard = rotateBoardRight(movedBoard);
       movedBoard = rotateBoardRight(movedBoard);
@@ -228,18 +320,6 @@ export default function Home() {
     if (isGameOver(withNewTile)) setGameOver(true);
   };
 
-  const isGameOver = (b: Board): boolean => {
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      for (let j = 0; j < BOARD_SIZE; j++) {
-        if (b[i][j] === null) return false;
-        const val = client.unseal(b[i][j]);
-        if (i < BOARD_SIZE - 1 && val === client.unseal(b[i + 1][j])) return false;
-        if (j < BOARD_SIZE - 1 && val === client.unseal(b[i][j + 1])) return false;
-      }
-    }
-    return true;
-  };
-
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       // Prevent arrow keys from scrolling the page
@@ -259,12 +339,25 @@ export default function Home() {
   const connectWallet = async () => {
     try {
       setTxMessage(null);
-      const provider = new BrowserProvider((window as any).ethereum);
+
+      const eth = getEthereum();
+      if (!eth) {
+        setTxMessage("No wallet found.");
+        return;
+      }
+
+      // Keep wallet on Base Sepolia for NFT usage
+      const chainIdHex = await getChainIdHex();
+      if (chainIdHex !== BASE_SEPOLIA_CHAIN_HEX) {
+        await switchChain(BASE_SEPOLIA_CHAIN_HEX);
+      }
+
+      const provider = new BrowserProvider(eth);
       await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
       const addr = await signer.getAddress();
+
       setWalletAddress(addr);
-      setTxMessage(null);
     } catch (e: any) {
       setTxMessage(e?.message ?? String(e));
     }
@@ -279,31 +372,80 @@ export default function Home() {
   };
 
   const enableFHE = async () => {
+    const eth = getEthereum();
+    if (!eth) {
+      setTxMessage("No wallet found.");
+      return;
+    }
+
     try {
       setTxMessage(null);
+
+      // Ensure wallet is connected (Base Sepolia)
       if (!walletAddress) {
         await connectWallet();
       }
-      const provider = new BrowserProvider((window as any).ethereum);
-      await provider.send("eth_requestAccounts", []);
-      const signer = await provider.getSigner();
-      const addr = await signer.getAddress();
 
-      const okInit = await initWithEthers({ provider, signer, environment: "TESTNET" });
+      // Remember current chain (should be Base Sepolia)
+      const originalChainIdHex = await getChainIdHex();
+
+      // Switch to Arbitrum Sepolia ONLY for CoFHE permit generation
+      await switchChain(ARB_SEPOLIA_CHAIN_HEX);
+
+      // Re-create provider/signer AFTER switching chain
+      const arbProvider = new BrowserProvider(eth);
+      await arbProvider.send("eth_requestAccounts", []);
+      const arbSigner = await arbProvider.getSigner();
+      const issuer = await arbSigner.getAddress();
+
+      // Initialize CoFHE on the supported testnet
+      const okInit = await initWithEthers({
+        provider: arbProvider,
+        signer: arbSigner,
+        environment: "TESTNET",
+      });
+
       if (!okInit) {
         setTxMessage("FHE init failed. Check console for details.");
+        await switchChain(originalChainIdHex);
         return;
       }
 
-      const okPermit = await createSelfPermit({ issuer: addr, daysValid: 30 });
-      if (!okPermit) {
-        setTxMessage("Permit generation failed. You can retry or Reset Permit.");
+      // Create self permit via CoFHE SDK
+      if (!window.cofhejs || typeof window.cofhejs.createPermit !== "function") {
+        setTxMessage("CoFHE createPermit is not available on window.");
+        await switchChain(originalChainIdHex);
         return;
       }
 
-      setTxMessage("FHE enabled successfully.");
+      const expiration = Math.round(Date.now() / 1000) + 24 * 60 * 60;
+
+      const permitRes = await window.cofhejs.createPermit({
+        type: "self",
+        issuer,
+        name: "Encrypted 2048",
+        expiration,
+      });
+
+      if (permitRes && typeof permitRes === "object" && "success" in permitRes && !permitRes.success) {
+        console.error("Permit creation failed:", permitRes.error);
+        setTxMessage(String(permitRes.error ?? "Permit creation failed."));
+        await switchChain(originalChainIdHex);
+        return;
+      }
+
+      // Return to Base Sepolia for NFT minting
+      await switchChain(BASE_SEPOLIA_CHAIN_HEX);
+
+      setTxMessage("FHE enabled successfully (permit generated).");
     } catch (e: any) {
+      console.error("Enable FHE flow failed:", e);
       setTxMessage(e?.message ?? String(e));
+
+      // Best-effort return to Base Sepolia
+      try {
+        await switchChain(BASE_SEPOLIA_CHAIN_HEX);
+      } catch {}
     }
   };
 
@@ -312,24 +454,35 @@ export default function Home() {
       setTxMessage("Please connect wallet");
       return;
     }
+
+    const eth = getEthereum();
+    if (!eth) {
+      setTxMessage("No wallet found.");
+      return;
+    }
+
     setIsClaiming(true);
     setTxMessage("Sending transaction...");
 
     try {
-      const provider = new BrowserProvider((window as any).ethereum);
+      // Ensure we are on Base Sepolia before mint
+      const chainIdHex = await getChainIdHex();
+      if (chainIdHex !== BASE_SEPOLIA_CHAIN_HEX) {
+        await switchChain(BASE_SEPOLIA_CHAIN_HEX);
+      }
+
+      const provider = new BrowserProvider(eth);
       await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
-      const contract = new Contract(ACHIEVEMENT_CONTRACT_ADDRESS, ACHIEVEMENT_CONTRACT_ABI, signer);
 
+      const contract = new Contract(ACHIEVEMENT_CONTRACT_ADDRESS, ACHIEVEMENT_CONTRACT_ABI, signer);
       const levelIndex = id === "medium_power" ? 0 : id === "big_power" ? 1 : 2;
 
       const tx = await contract.mintAchievement(levelIndex);
       setTxMessage("Transaction sent. Waiting confirmation...");
       await tx.wait();
 
-      setAchievements((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, claimed: true } : a))
-      );
+      setAchievements((prev) => prev.map((a) => (a.id === id ? { ...a, claimed: true } : a)));
       setTxMessage("Mint successful!");
     } catch (e: any) {
       setTxMessage(e?.message ?? String(e));
@@ -359,13 +512,13 @@ export default function Home() {
           <div className="flex items-center justify-between gap-3">
             <div className="flex flex-col">
               <div className="text-sm font-semibold text-foreground">FHE Access</div>
-              <div className="text-[11px] text-foreground/70">
-                Status: {status === "ready" ? "Ready" : status === "permit-required" ? "Permit required" : status}
-              </div>
+              <div className="text-[11px] text-foreground/70">Status: {status}</div>
               {error && <div className="text-[11px] text-red-500 mt-1">{error}</div>}
               {txMessage && <div className="text-[11px] text-foreground/80 mt-1">{txMessage}</div>}
               {walletAddress && (
-                <div className="text-[11px] text-foreground/70 mt-1">Wallet: {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</div>
+                <div className="text-[11px] text-foreground/70 mt-1">
+                  Wallet: {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
+                </div>
               )}
             </div>
 
@@ -378,10 +531,7 @@ export default function Home() {
                 Enable FHE (Generate Permit)
               </button>
 
-              <button
-                className="px-3 py-2 rounded-md border border-border text-xs"
-                onClick={resetPermit}
-              >
+              <button className="px-3 py-2 rounded-md border border-border text-xs" onClick={resetPermit}>
                 Reset Permit
               </button>
             </div>
@@ -393,10 +543,7 @@ export default function Home() {
           <div className="grid grid-cols-4 gap-2">
             {board.map((row, i) =>
               row.map((value, j) => (
-                <div
-                  key={`${i}-${j}`}
-                  className={`w-full aspect-square rounded-lg ${renderCell(value)}`}
-                />
+                <div key={`${i}-${j}`} className={`w-full aspect-square rounded-lg ${renderCell(value)}`} />
               ))
             )}
           </div>
@@ -404,29 +551,17 @@ export default function Home() {
 
         {/* Controls */}
         <div className="shrink-0 mt-4 flex flex-col items-center gap-3">
-          <button
-            className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
-            onClick={() => move("up")}
-          >
+          <button className="w-32 py-2 bg-primary text-primary-foreground rounded-md" onClick={() => move("up")}>
             Up
           </button>
           <div className="flex gap-3">
-            <button
-              className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
-              onClick={() => move("left")}
-            >
+            <button className="w-32 py-2 bg-primary text-primary-foreground rounded-md" onClick={() => move("left")}>
               Left
             </button>
-            <button
-              className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
-              onClick={() => move("down")}
-            >
+            <button className="w-32 py-2 bg-primary text-primary-foreground rounded-md" onClick={() => move("down")}>
               Down
             </button>
-            <button
-              className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
-              onClick={() => move("right")}
-            >
+            <button className="w-32 py-2 bg-primary text-primary-foreground rounded-md" onClick={() => move("right")}>
               Right
             </button>
           </div>
@@ -442,16 +577,13 @@ export default function Home() {
           ))}
         </div>
 
-        {/* Achievements (internal scroll, page stays fixed) */}
+        {/* Achievements */}
         <div className="mt-4 flex-1 overflow-hidden">
-          <h2 className="text-sm font-semibold text-foreground mb-2 px-1">
-            FHE Achievements (on-chain ready)
-          </h2>
+          <h2 className="text-sm font-semibold text-foreground mb-2 px-1">FHE Achievements (on-chain ready)</h2>
 
           <div className="h-full max-h-[220px] overflow-y-auto space-y-2 text-xs text-foreground/80 pr-1">
             {achievements.map((ach) => {
               const disabled = !ach.unlocked || ach.claimed || isClaiming;
-              const levelMeta = TILE_LEVELS.find((t) => t.name === ach.level)!;
 
               return (
                 <div
@@ -466,9 +598,7 @@ export default function Home() {
                       <span className="font-semibold text-foreground text-xs">{ach.title}</span>
                     </div>
                     <span className="text-[11px]">{ach.description}</span>
-                    <span className="text-[10px] text-foreground/60">
-                      Threshold: value ≥ {ach.threshold}
-                    </span>
+                    <span className="text-[10px] text-foreground/60">Threshold: value ≥ {ach.threshold}</span>
                   </div>
 
                   <div className="flex flex-col items-end gap-2">
@@ -493,10 +623,7 @@ export default function Home() {
           </p>
 
           <div className="mt-3 px-1 flex gap-2">
-            <button
-              className="flex-1 py-2 bg-primary text-primary-foreground rounded-md"
-              onClick={connectWallet}
-            >
+            <button className="flex-1 py-2 bg-primary text-primary-foreground rounded-md" onClick={connectWallet}>
               {walletAddress
                 ? `Connected: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
                 : "Connect wallet"}
@@ -512,9 +639,7 @@ export default function Home() {
           </div>
         </div>
 
-        <footer className="shrink-0 pt-3 text-center text-foreground/60 text-xs">
-          Made with love by mora
-        </footer>
+        <footer className="shrink-0 pt-3 text-center text-foreground/60 text-xs">Made with love by mora</footer>
       </div>
     </div>
   );
