@@ -15,7 +15,7 @@
       console.log("✅ CoFHE loaded from CDN");
     } catch (e) {
       console.error("❌ Failed to load CoFHE from CDN", e);
-      window.CoFHE = null; // باعث می‌شه بازی با mock بالا بیاد و سفید نشه
+      window.CoFHE = null; //  // Fall back to mock mode so the app does not render a blank page
     }
   })();
  </script>
