@@ -184,7 +184,7 @@ export default function Home() {
     for (let k = 0; k < rotateTimes; k++) newBoard = rotateBoardRight(newBoard);
 
     let gained = 0;
-    const movedBoard = newBoard.map((row) => {
+    let movedBoard = newBoard.map((row) => {
       const [slid, scoreAdd] = slideRowLeft(row);
       gained += scoreAdd;
       return slid;
