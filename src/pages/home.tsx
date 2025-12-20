@@ -10,34 +10,26 @@ type Direction = "left" | "right" | "up" | "down";
 
 const BOARD_SIZE = 4;
 
-const ACHIEVEMENT_CONTRACT_ADDRESS =
-  "0xDE0c86c1c4607713Fd19e000661Ada864b6c493a";
+const ACHIEVEMENT_CONTRACT_ADDRESS = "0xDE0c86c1c4607713Fd19e000661Ada864b6c493a";
 
 const ACHIEVEMENT_CONTRACT_ABI = [
   {
-    inputs: [{ internalType: "uint8", name: "levelIndex", type: "uint8" }],
+    inputs: [{ internalType: "uint8", name: "level", type: "uint8" }],
     name: "mintAchievement",
-    outputs: [{ internalType: "uint256", name: "tokenId", type: "uint256" }],
+    outputs: [],
     stateMutability: "nonpayable",
     type: "function",
   },
-] as const;
+];
 
-type TileLevelName = "tiny" | "small" | "medium" | "big" | "legendary";
+type TileLevelName = "Tiny" | "Small" | "Medium" | "Big" | "Legendary";
 
-type TileLevelMeta = {
-  name: TileLevelName;
-  label: string;
-  bgClass: string;
-  textClass: string;
-};
-
-const TILE_LEVELS: TileLevelMeta[] = [
-  { name: "tiny", label: "Tiny", bgClass: "bg-slate-700", textClass: "text-slate-50" },
-  { name: "small", label: "Small", bgClass: "bg-blue-600", textClass: "text-blue-50" },
-  { name: "medium", label: "Medium", bgClass: "bg-emerald-500", textClass: "text-emerald-50" },
-  { name: "big", label: "Big", bgClass: "bg-violet-500", textClass: "text-violet-50" },
-  { name: "legendary", label: "Legendary", bgClass: "bg-amber-500", textClass: "text-amber-50" },
+const TILE_LEVELS: { name: TileLevelName; bg: string }[] = [
+  { name: "Tiny", bg: "bg-slate-700" },
+  { name: "Small", bg: "bg-blue-600" },
+  { name: "Medium", bg: "bg-emerald-500" },
+  { name: "Big", bg: "bg-violet-500" },
+  { name: "Legendary", bg: "bg-amber-500" },
 ];
 
 type AchievementId = "medium_power" | "big_power" | "legendary_power";
@@ -55,7 +47,7 @@ type Achievement = {
 const INITIAL_ACHIEVEMENTS: Achievement[] = [
   {
     id: "medium_power",
-    level: "medium",
+    level: "Medium",
     title: "Medium Power Unlocked",
     description: "You reached a Medium-level encrypted tile for the first time.",
     threshold: 128,
@@ -64,7 +56,7 @@ const INITIAL_ACHIEVEMENTS: Achievement[] = [
   },
   {
     id: "big_power",
-    level: "big",
+    level: "Big",
     title: "Big Power Unlocked",
     description: "You reached a Big-level encrypted tile for the first time.",
     threshold: 512,
@@ -73,7 +65,7 @@ const INITIAL_ACHIEVEMENTS: Achievement[] = [
   },
   {
     id: "legendary_power",
-    level: "legendary",
+    level: "Legendary",
     title: "Legendary Power",
     description: "You reached a Legendary-level encrypted tile. Insane!",
     threshold: 2048,
@@ -82,48 +74,36 @@ const INITIAL_ACHIEVEMENTS: Achievement[] = [
   },
 ];
 
-export default function Home() {
-  const fhe = useFHE();
+function getTileLevel(value: number): TileLevelName {
+  if (value >= 2048) return "Legendary";
+  if (value >= 512) return "Big";
+  if (value >= 128) return "Medium";
+  if (value >= 4) return "Small";
+  return "Tiny";
+}
 
-  const [board, setBoard] = useState<Board>(() =>
-    Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null))
+export default function Home() {
+  const { client, initialized, status, error, initWithEthers, createSelfPermit, resetPermit } = useFHE();
+
+  const [board, setBoard] = useState<Board>(
+    Array(BOARD_SIZE)
+      .fill(null)
+      .map(() => Array(BOARD_SIZE).fill(null))
   );
   const [score, setScore] = useState(0);
   const [gameOver, setGameOver] = useState(false);
-  const [achievements, setAchievements] = useState(INITIAL_ACHIEVEMENTS);
 
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
-  const [isBusy, setIsBusy] = useState(false);
   const [txMessage, setTxMessage] = useState<string | null>(null);
+  const [isClaiming, setIsClaiming] = useState(false);
 
-  // Prevent page scrolling (arrow keys + body overflow)
-  useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prevOverflow;
-    };
-  }, []);
+  const [achievements, setAchievements] = useState<Achievement[]>(INITIAL_ACHIEVEMENTS);
 
-  const canPlay = useMemo(() => {
-    // Allow play even if FHE is not ready (mock mode)
-    return !gameOver;
-  }, [gameOver]);
+  const canEnableFhe = useMemo(() => {
+    return !!walletAddress && (status === "cdn-loaded" || status === "permit-required" || status === "error");
+  }, [walletAddress, status]);
 
-  const getTileLevel = async (val: EncryptedValue): Promise<TileLevelMeta> => {
-    try {
-      const plainValue = await fhe.client.unseal(val);
-      if (plainValue < 16) return TILE_LEVELS[0];
-      if (plainValue < 128) return TILE_LEVELS[1];
-      if (plainValue < 512) return TILE_LEVELS[2];
-      if (plainValue < 2048) return TILE_LEVELS[3];
-      return TILE_LEVELS[4];
-    } catch {
-      return TILE_LEVELS[0];
-    }
-  };
-
-  const addRandomTile = async (b: Board): Promise<Board> => {
+  const addRandomTile = (b: Board): Board => {
     const empty: [number, number][] = [];
     for (let i = 0; i < BOARD_SIZE; i++) {
       for (let j = 0; j < BOARD_SIZE; j++) {
@@ -136,19 +116,18 @@ export default function Home() {
     const newBoard = b.map((row) => [...row]);
 
     const plainValue = Math.random() < 0.9 ? 2 : 4;
-
-    // In FHE-ready mode this returns an encrypted handle, otherwise it returns a mock number.
-    const encrypted = await fhe.client.encrypt32(plainValue);
+    const encrypted = client.encrypt32(plainValue);
 
     newBoard[r][c] = encrypted;
     return newBoard;
   };
 
-  const initializeBoard = async () => {
-    let newBoard: Board = Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null));
-    newBoard = await addRandomTile(newBoard);
-    newBoard = await addRandomTile(newBoard);
+  const initializeBoard = () => {
+    let newBoard = Array(BOARD_SIZE)
+      .fill(null)
+      .map(() => Array(BOARD_SIZE).fill(null));
 
+    newBoard = addRandomTile(addRandomTile(newBoard));
     setBoard(newBoard);
     setScore(0);
     setGameOver(false);
@@ -156,21 +135,21 @@ export default function Home() {
   };
 
   useEffect(() => {
-    // Always initialize once on mount (even if FHE not ready)
-    initializeBoard();
+    if (initialized && client) {
+      initializeBoard();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialized]);
 
-  const slideRowLeft = async (row: CellValue[]): Promise<[CellValue[], number]> => {
-    const filtered = row.filter((v) => v !== null) as EncryptedValue[];
+  const slideRowLeft = (row: CellValue[]): [CellValue[], number] => {
+    const filtered = row.filter((v) => v !== null);
     let scoreAdd = 0;
 
     for (let j = 0; j < filtered.length - 1; j++) {
-      const v1 = await fhe.client.unseal(filtered[j]);
-      const v2 = await fhe.client.unseal(filtered[j + 1]);
-
+      const v1 = client.unseal(filtered[j]);
+      const v2 = client.unseal(filtered[j + 1]);
       if (v1 === v2) {
-        const merged = await fhe.client.encrypt32(v1 * 2);
+        const merged = client.encrypt32(v1 * 2);
         filtered[j] = merged;
         scoreAdd += v1 * 2;
         filtered.splice(j + 1, 1);
@@ -178,165 +157,153 @@ export default function Home() {
       }
     }
 
-    const padded = filtered.concat(Array(BOARD_SIZE - filtered.length).fill(null));
-    return [padded, scoreAdd];
+    while (filtered.length < BOARD_SIZE) filtered.push(null);
+    return [filtered as CellValue[], scoreAdd];
   };
 
-  const transpose = (b: Board): Board => b[0].map((_, col) => b.map((row) => row[col]));
-  const reverseRows = (b: Board): Board => b.map((row) => row.slice().reverse());
+  const rotateBoardRight = (b: Board): Board => {
+    const rotated: Board = Array(BOARD_SIZE)
+      .fill(null)
+      .map(() => Array(BOARD_SIZE).fill(null));
+    for (let i = 0; i < BOARD_SIZE; i++) {
+      for (let j = 0; j < BOARD_SIZE; j++) {
+        rotated[j][BOARD_SIZE - 1 - i] = b[i][j];
+      }
+    }
+    return rotated;
+  };
 
-  const isGameOver = async (b: Board): Promise<boolean> => {
+  const move = (dir: Direction) => {
+    if (gameOver) return;
+
+    let newBoard = board.map((row) => [...row]);
+
+    const rotateTimes =
+      dir === "left" ? 0 : dir === "up" ? 3 : dir === "right" ? 2 : 1;
+
+    for (let k = 0; k < rotateTimes; k++) newBoard = rotateBoardRight(newBoard);
+
+    let gained = 0;
+    const movedBoard = newBoard.map((row) => {
+      const [slid, scoreAdd] = slideRowLeft(row);
+      gained += scoreAdd;
+      return slid;
+    });
+
+    for (let k = 0; k < (4 - rotateTimes) % 4; k++) {
+      // rotate back left (3 rights)
+      movedBoard = rotateBoardRight(movedBoard);
+      movedBoard = rotateBoardRight(movedBoard);
+      movedBoard = rotateBoardRight(movedBoard);
+    }
+
+    const changed = JSON.stringify(movedBoard) !== JSON.stringify(board);
+    if (!changed) return;
+
+    const withNewTile = addRandomTile(movedBoard);
+
+    setBoard(withNewTile);
+    setScore((s) => s + gained);
+
+    // Update achievements based on max value (hidden from UI, but used internally)
+    let maxValue = 0;
+    withNewTile.forEach((r) =>
+      r.forEach((val) => {
+        if (val !== null) {
+          const plain = client.unseal(val);
+          if (plain > maxValue) maxValue = plain;
+        }
+      })
+    );
+
+    setAchievements((prev) =>
+      prev.map((ach) => {
+        if (!ach.unlocked && maxValue >= ach.threshold) {
+          return { ...ach, unlocked: true };
+        }
+        return ach;
+      })
+    );
+
+    if (isGameOver(withNewTile)) setGameOver(true);
+  };
+
+  const isGameOver = (b: Board): boolean => {
     for (let i = 0; i < BOARD_SIZE; i++) {
       for (let j = 0; j < BOARD_SIZE; j++) {
         if (b[i][j] === null) return false;
-
-        const val = await fhe.client.unseal(b[i][j]);
-        if (i < BOARD_SIZE - 1) {
-          const down = await fhe.client.unseal(b[i + 1][j]);
-          if (val === down) return false;
-        }
-        if (j < BOARD_SIZE - 1) {
-          const right = await fhe.client.unseal(b[i][j + 1]);
-          if (val === right) return false;
-        }
+        const val = client.unseal(b[i][j]);
+        if (i < BOARD_SIZE - 1 && val === client.unseal(b[i + 1][j])) return false;
+        if (j < BOARD_SIZE - 1 && val === client.unseal(b[i][j + 1])) return false;
       }
     }
     return true;
   };
 
-  const move = async (direction: Direction) => {
-    if (!canPlay) return;
-
-    let newBoard = board.map((row) => [...row]);
-    let totalScoreAdd = 0;
-    let moved = false;
-
-    if (direction === "up") newBoard = transpose(newBoard);
-    if (direction === "right") newBoard = reverseRows(newBoard);
-    if (direction === "down") {
-      newBoard = transpose(newBoard);
-      newBoard = reverseRows(newBoard);
-    }
-
-    for (let i = 0; i < BOARD_SIZE; i++) {
-      const [newRow, scoreAdd] = await slideRowLeft(newBoard[i]);
-      totalScoreAdd += scoreAdd;
-      if (JSON.stringify(newRow) !== JSON.stringify(newBoard[i])) moved = true;
-      newBoard[i] = newRow;
-    }
-
-    if (direction === "up") newBoard = transpose(newBoard);
-    if (direction === "right") newBoard = reverseRows(newBoard);
-    if (direction === "down") {
-      newBoard = reverseRows(newBoard);
-      newBoard = transpose(newBoard);
-    }
-
-    if (!moved) return;
-
-    newBoard = await addRandomTile(newBoard);
-    setBoard(newBoard);
-    setScore((prev) => prev + totalScoreAdd);
-
-    let maxValue = 0;
-    for (const row of newBoard) {
-      for (const v of row) {
-        if (v) {
-          const plain = await fhe.client.unseal(v);
-          if (plain > maxValue) maxValue = plain;
-        }
-      }
-    }
-
-    setAchievements((prev) =>
-      prev.map((ach) => (!ach.unlocked && maxValue >= ach.threshold ? { ...ach, unlocked: true } : ach))
-    );
-
-    if (await isGameOver(newBoard)) setGameOver(true);
-  };
-
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      const isArrow =
-        e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight";
+      // Prevent arrow keys from scrolling the page
+      if (e.key.startsWith("Arrow")) e.preventDefault();
 
-      if (isArrow) e.preventDefault();
-
-      if (e.key === "ArrowUp") void move("up");
-      if (e.key === "ArrowDown") void move("down");
-      if (e.key === "ArrowLeft") void move("left");
-      if (e.key === "ArrowRight") void move("right");
+      if (e.key === "ArrowLeft") move("left");
+      if (e.key === "ArrowRight") move("right");
+      if (e.key === "ArrowUp") move("up");
+      if (e.key === "ArrowDown") move("down");
     };
 
-    window.addEventListener("keydown", handleKey, { passive: false } as any);
-    return () => window.removeEventListener("keydown", handleKey as any);
+    window.addEventListener("keydown", handleKey, { passive: false });
+    return () => window.removeEventListener("keydown", handleKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [board, gameOver]);
 
   const connectWallet = async () => {
-    if (!(window as any).ethereum) {
-      alert("Please install MetaMask or a compatible wallet");
-      return;
-    }
-
     try {
+      setTxMessage(null);
       const provider = new BrowserProvider((window as any).ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
-      const address = await signer.getAddress();
-      setWalletAddress(address);
+      const addr = await signer.getAddress();
+      setWalletAddress(addr);
       setTxMessage(null);
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setTxMessage(e?.message ?? String(e));
     }
   };
 
   const disconnectWallet = () => {
+    // We cannot force MetaMask to disconnect, but we can clear app state.
     setWalletAddress(null);
     setTxMessage(null);
+    setIsClaiming(false);
+    resetPermit();
   };
 
   const enableFHE = async () => {
-    if (!walletAddress) {
-      await connectWallet();
-      return;
-    }
-
-    if (!(window as any).ethereum) {
-      alert("Wallet provider not found");
-      return;
-    }
-
-    setIsBusy(true);
-    setTxMessage("Initializing CoFHE...");
-
     try {
+      setTxMessage(null);
+      if (!walletAddress) {
+        await connectWallet();
+      }
       const provider = new BrowserProvider((window as any).ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
+      const addr = await signer.getAddress();
 
-      const okInit = await fhe.initCoFHE({
-        provider,
-        signer,
-        environment: "TESTNET",
-      });
-
+      const okInit = await initWithEthers({ provider, signer, environment: "TESTNET" });
       if (!okInit) {
-        setTxMessage(fhe.error || "Initialization failed");
+        setTxMessage("FHE init failed. Check console for details.");
         return;
       }
 
-      setTxMessage("Generating permit (signature required)...");
-      const okPermit = await fhe.generatePermit(walletAddress);
-
+      const okPermit = await createSelfPermit({ issuer: addr, daysValid: 30 });
       if (!okPermit) {
-        setTxMessage(fhe.error || "Permit generation failed");
+        setTxMessage("Permit generation failed. You can retry or Reset Permit.");
         return;
       }
 
-      setTxMessage("FHE is enabled ✅");
-    } finally {
-      setIsBusy(false);
+      setTxMessage("FHE enabled successfully.");
+    } catch (e: any) {
+      setTxMessage(e?.message ?? String(e));
     }
   };
 
@@ -345,8 +312,7 @@ export default function Home() {
       setTxMessage("Please connect wallet");
       return;
     }
-
-    setIsBusy(true);
+    setIsClaiming(true);
     setTxMessage("Sending transaction...");
 
     try {
@@ -358,145 +324,134 @@ export default function Home() {
       const levelIndex = id === "medium_power" ? 0 : id === "big_power" ? 1 : 2;
 
       const tx = await contract.mintAchievement(levelIndex);
-      setTxMessage("Transaction sent, waiting...");
+      setTxMessage("Transaction sent. Waiting confirmation...");
       await tx.wait();
 
-      setTxMessage("NFT minted successfully!");
-      setAchievements((prev) => prev.map((ach) => (ach.id === id ? { ...ach, claimed: true } : ach)));
-    } catch (err: any) {
-      setTxMessage(`Error: ${err.message || "Unknown"}`);
-      console.error(err);
+      setAchievements((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, claimed: true } : a))
+      );
+      setTxMessage("Mint successful!");
+    } catch (e: any) {
+      setTxMessage(e?.message ?? String(e));
     } finally {
-      setIsBusy(false);
+      setIsClaiming(false);
     }
   };
 
+  const renderCell = (val: CellValue) => {
+    if (val === null) return "bg-slate-100";
+    const plain = client.unseal(val);
+    const level = getTileLevel(plain);
+    return TILE_LEVELS.find((t) => t.name === level)!.bg;
+  };
+
   return (
-    <div className="min-h-[100dvh] h-[100dvh] overflow-hidden bg-background flex flex-col items-center px-4 py-3">
-      <div className="w-full max-w-md flex flex-col items-center gap-3">
-        <div className="w-full">
-          <h1 className="text-4xl font-bold text-center">Encrypted 2048 - test</h1>
+    <div className="h-[100svh] overflow-hidden bg-background p-4">
+      <div className="mx-auto w-full max-w-md h-full flex flex-col">
+        <header className="shrink-0">
+          <h1 className="text-4xl font-bold text-center mb-1">Encrypted 2048 - test</h1>
           <p className="text-center text-muted-foreground">Score: {score}</p>
-          {gameOver && <p className="text-center text-red-500 text-xl mt-1">Game over</p>}
-          {fhe.error && <p className="text-center text-red-500 mt-1">{fhe.error}</p>}
-        </div>
+          {gameOver && <p className="text-center text-red-500 text-xl mt-2">Game over</p>}
+        </header>
 
-        {/* FHE Panel (replaces "Loading FHE...") */}
-        <div className="w-full border border-border rounded-xl bg-card/40 px-4 py-3">
-          <div className="flex items-center justify-between">
-            <div className="font-semibold text-sm">FHE Access</div>
-            <div className="text-xs text-foreground/60">
-              Status:{" "}
-              {fhe.status === "ready"
-                ? "Enabled"
-                : fhe.status === "permit-needed"
-                ? "Permit required"
-                : fhe.status === "initializing"
-                ? "Initializing"
-                : fhe.status === "cdn-loaded"
-                ? "Ready to enable"
-                : fhe.status === "cdn-missing"
-                ? "Unavailable"
-                : "Idle"}
+        {/* FHE Access */}
+        <div className="shrink-0 mt-3 border border-border rounded-lg p-3 bg-card/40">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col">
+              <div className="text-sm font-semibold text-foreground">FHE Access</div>
+              <div className="text-[11px] text-foreground/70">
+                Status: {status === "ready" ? "Ready" : status === "permit-required" ? "Permit required" : status}
+              </div>
+              {error && <div className="text-[11px] text-red-500 mt-1">{error}</div>}
+              {txMessage && <div className="text-[11px] text-foreground/80 mt-1">{txMessage}</div>}
+              {walletAddress && (
+                <div className="text-[11px] text-foreground/70 mt-1">Wallet: {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <button
+                className="px-3 py-2 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
+                onClick={enableFHE}
+                disabled={!canEnableFhe}
+              >
+                Enable FHE (Generate Permit)
+              </button>
+
+              <button
+                className="px-3 py-2 rounded-md border border-border text-xs"
+                onClick={resetPermit}
+              >
+                Reset Permit
+              </button>
             </div>
           </div>
-
-          <div className="mt-2 text-xs text-foreground/70">
-            Permit:{" "}
-            <span className={fhe.hasPermit ? "text-emerald-500 font-semibold" : "text-foreground/60"}>
-              {fhe.hasPermit ? "Generated" : "Not generated"}
-            </span>
-          </div>
-
-          {txMessage && <div className="mt-2 text-xs text-foreground/70">{txMessage}</div>}
-
-          <div className="mt-3 flex gap-2">
-            <button
-              className="flex-1 py-2 bg-primary text-primary-foreground rounded-md disabled:opacity-50"
-              onClick={enableFHE}
-              disabled={isBusy || fhe.status === "ready" || fhe.status === "cdn-missing"}
-            >
-              {fhe.status === "ready" ? "FHE Enabled" : isBusy ? "Working..." : "Enable FHE (Generate Permit)"}
-            </button>
-
-            <button
-              className="py-2 px-3 rounded-md border border-border bg-background text-foreground disabled:opacity-50"
-              onClick={walletAddress ? disconnectWallet : connectWallet}
-              disabled={isBusy}
-            >
-              {walletAddress ? "Disconnect" : "Connect"}
-            </button>
-          </div>
-
-          {walletAddress && (
-            <div className="mt-2 text-[11px] text-foreground/60">
-              Wallet: {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
-            </div>
-          )}
         </div>
 
-        {/* Board */}
-        <div className="w-full bg-card rounded-xl shadow-2xl p-4">
+        {/* Game board */}
+        <div className="shrink-0 mt-3 bg-card rounded-xl shadow-2xl p-4">
           <div className="grid grid-cols-4 gap-2">
             {board.map((row, i) =>
               row.map((value, j) => (
-                <div key={`${i}-${j}`} className="aspect-square rounded-lg bg-muted" />
+                <div
+                  key={`${i}-${j}`}
+                  className={`w-full aspect-square rounded-lg ${renderCell(value)}`}
+                />
               ))
             )}
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-3 w-full">
-          <div />
+        {/* Controls */}
+        <div className="shrink-0 mt-4 flex flex-col items-center gap-3">
           <button
-            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
-            onClick={() => void move("up")}
-            disabled={!canPlay}
+            className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
+            onClick={() => move("up")}
           >
             Up
           </button>
-          <div />
-          <button
-            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
-            onClick={() => void move("left")}
-            disabled={!canPlay}
-          >
-            Left
-          </button>
-          <button
-            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
-            onClick={() => void move("down")}
-            disabled={!canPlay}
-          >
-            Down
-          </button>
-          <button
-            className="bg-primary text-primary-foreground rounded-lg py-3 font-semibold disabled:opacity-50"
-            onClick={() => void move("right")}
-            disabled={!canPlay}
-          >
-            Right
-          </button>
+          <div className="flex gap-3">
+            <button
+              className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
+              onClick={() => move("left")}
+            >
+              Left
+            </button>
+            <button
+              className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
+              onClick={() => move("down")}
+            >
+              Down
+            </button>
+            <button
+              className="w-32 py-2 bg-primary text-primary-foreground rounded-md"
+              onClick={() => move("right")}
+            >
+              Right
+            </button>
+          </div>
         </div>
 
         {/* Legend */}
-        <div className="flex items-center justify-center gap-4 flex-wrap">
-          {TILE_LEVELS.map((lvl) => (
-            <div key={lvl.name} className="flex items-center gap-2">
-              <div className={`w-5 h-5 rounded ${lvl.bgClass}`} />
-              <span className="text-xs text-foreground/80">{lvl.label}</span>
+        <div className="shrink-0 mt-4 flex flex-wrap justify-center gap-4">
+          {TILE_LEVELS.map((t) => (
+            <div key={t.name} className="flex items-center gap-2">
+              <div className={`w-6 h-6 rounded ${t.bg}`} />
+              <span className="text-sm text-foreground/80">{t.name}</span>
             </div>
           ))}
         </div>
 
-        {/* Achievements (internal scroll) */}
-        <div className="w-full px-1">
-          <h2 className="text-xs font-semibold text-foreground mb-2">FHE Achievements (on-chain ready)</h2>
+        {/* Achievements (internal scroll, page stays fixed) */}
+        <div className="mt-4 flex-1 overflow-hidden">
+          <h2 className="text-sm font-semibold text-foreground mb-2 px-1">
+            FHE Achievements (on-chain ready)
+          </h2>
 
-          <div className="space-y-2 text-xs text-foreground/80 max-h-36 overflow-auto pr-1">
+          <div className="h-full max-h-[220px] overflow-y-auto space-y-2 text-xs text-foreground/80 pr-1">
             {achievements.map((ach) => {
-              const levelMeta = TILE_LEVELS.find((l) => l.name === ach.level)!;
-              const disabled = !ach.unlocked || ach.claimed || isBusy;
+              const disabled = !ach.unlocked || ach.claimed || isClaiming;
+              const levelMeta = TILE_LEVELS.find((t) => t.name === ach.level)!;
 
               return (
                 <div
@@ -505,32 +460,27 @@ export default function Home() {
                 >
                   <div className="flex flex-col gap-0.5">
                     <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${levelMeta.bgClass} ${levelMeta.textClass}`}
-                      >
-                        {levelMeta.label.toUpperCase()}
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border border-border">
+                        {ach.level.toUpperCase()}
                       </span>
                       <span className="font-semibold text-foreground text-xs">{ach.title}</span>
                     </div>
                     <span className="text-[11px]">{ach.description}</span>
-                    <span className="text-[10px] text-foreground/60">Threshold: value ≥ {ach.threshold}</span>
+                    <span className="text-[10px] text-foreground/60">
+                      Threshold: value ≥ {ach.threshold}
+                    </span>
                   </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <span
-                      className={
-                        ach.unlocked
-                          ? "text-[10px] text-emerald-500 font-semibold"
-                          : "text-[10px] text-foreground/40"
-                      }
-                    >
-                      {ach.unlocked ? "Unlocked" : "Locked"}
+
+                  <div className="flex flex-col items-end gap-2">
+                    <span className="text-[10px] text-foreground/60">
+                      {ach.claimed ? "Claimed" : ach.unlocked ? "Unlocked" : "Locked"}
                     </span>
                     <button
-                      className="px-2 py-1 rounded-md text-[10px] bg-primary text-primary-foreground disabled:bg-muted disabled:text-foreground/40"
+                      className="px-3 py-1.5 rounded-md border border-border text-[11px] disabled:opacity-50"
                       disabled={disabled}
-                      onClick={() => void handleClaimAchievement(ach.id)}
+                      onClick={() => handleClaimAchievement(ach.id)}
                     >
-                      {ach.claimed ? "Claimed" : isBusy ? "Working..." : "Claim NFT"}
+                      {ach.claimed ? "Claimed" : isClaiming ? "Claiming..." : "Claim NFT"}
                     </button>
                   </div>
                 </div>
@@ -538,15 +488,33 @@ export default function Home() {
             })}
           </div>
 
-          <p className="mt-2 text-[10px] text-foreground/60">
+          <p className="mt-2 text-[10px] text-foreground/60 px-1">
             When connected to Base Sepolia, claiming an achievement will call the on-chain CipherAchievements contract and mint a real NFT.
           </p>
+
+          <div className="mt-3 px-1 flex gap-2">
+            <button
+              className="flex-1 py-2 bg-primary text-primary-foreground rounded-md"
+              onClick={connectWallet}
+            >
+              {walletAddress
+                ? `Connected: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+                : "Connect wallet"}
+            </button>
+
+            <button
+              className="px-4 py-2 rounded-md border border-border"
+              onClick={disconnectWallet}
+              disabled={!walletAddress}
+            >
+              Disconnect
+            </button>
+          </div>
         </div>
 
-        {/* Footer inside layout (no scroll, not too low) */}
-        <div className="w-full text-center text-foreground/60 text-sm pt-1 pb-2">
+        <footer className="shrink-0 pt-3 text-center text-foreground/60 text-xs">
           Made with love by mora
-        </div>
+        </footer>
       </div>
     </div>
   );
