@@ -338,6 +338,10 @@ export default function Home() {
       setTxMessage("No wallet found.");
       return;
     }
+    if (!window.cofhejs || typeof window.cofhejs.initializeWithEthers !== "function") {
+      setTxMessage("CoFHE SDK is not ready. Refresh the page and try again.");
+      return;
+    } 
 
     setIsBusy(true);
     setTxMessage("Switching to Arbitrum Sepolia for FHE permit...");
@@ -421,8 +425,9 @@ export default function Home() {
   };
 
   const canEnableFhe = useMemo(() => {
-    return !!walletAddress && (status === "cdn-loaded" || status === "permit-required" || status === "error");
-  }, [walletAddress, status]);
+  return !!walletAddress;
+     }, [walletAddress]);
+
 
   return (
     <div className="h-screen w-full bg-background overflow-hidden flex items-center justify-center p-3">
