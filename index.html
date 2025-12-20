@@ -6,21 +6,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Encrypted 2048</title>
 
-    <!-- Load CoFHE from CDN (official Fhenix method) -->
+    <!-- Load CoFHE from CDN -->
     <script type="module">
-  (async () => {
-    try {
-      const mod = await import("https://esm.sh/cofhejs@0.3.1/dist/web.mjs");
-      window.CoFHE = mod.CoFHE;
-      console.log("✅ CoFHE loaded from CDN");
-    } catch (e) {
-      console.error("❌ Failed to load CoFHE from CDN", e);
-      window.CoFHE = null; //  // Fall back to mock mode so the app does not render a blank page
-    }
-  })();
- </script>
+      (async () => {
+        try {
+          // Use bundling so bare imports (e.g. "tweetnacl") are resolved for the browser.
+          const mod = await import("https://esm.sh/cofhejs@0.3.1/dist/web.mjs?bundle");
 
+          // Try multiple export shapes to be resilient to CDN/module wrapping differences.
+          const CoFHE =
+            mod.CoFHE ??
+            mod.default?.CoFHE ??
+            mod.default ??
+            null;
+
+          if (!CoFHE) {
+            throw new Error("CoFHE export was not found on the loaded module");
+          }
+
+          window.CoFHE = CoFHE;
+          window.__COFHE_STATUS__ = "loaded";
+          console.log("✅ CoFHE loaded from CDN");
+        } catch (e) {
+          window.CoFHE = null;
+          window.__COFHE_STATUS__ = "failed";
+          console.error("❌ Failed to load CoFHE from CDN", e);
+        }
+      })();
+    </script>
   </head>
+
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
