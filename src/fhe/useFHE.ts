@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 declare global {
   interface Window {
     cofhejs?: any;
     Encryptable?: any;
-    CoFHE?: any;
     __COFHE_STATUS__?: string;
   }
 }
@@ -26,97 +25,69 @@ type InitArgs = {
   environment?: "TESTNET" | "LOCAL" | "MAINNET";
 };
 
-type PermitArgs = {
+type PermitState = {
   issuer: string;
-  name?: string;
-  daysValid?: number;
-};
+  hash: string;
+  raw: any;
+} | null;
 
-function getCofheSdk(): any | null {
-  if (window.cofhejs) return window.cofhejs;
-  if (window.CoFHE) return window.CoFHE;
-  return null;
+function getSdk(): any | null {
+  return window.cofhejs ?? null;
 }
 
 function getEncryptable(): any | null {
   return window.Encryptable ?? null;
 }
 
-function safeClearCofheLocalStorage() {
-  try {
-    const keysToRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (!k) continue;
-      const lk = k.toLowerCase();
-      if (lk.includes("cofhe") || lk.includes("permit") || lk.includes("fhenix")) {
-        keysToRemove.push(k);
-      }
-    }
-    keysToRemove.forEach((k) => localStorage.removeItem(k));
-  } catch {
-    // Ignore storage errors (private mode, blocked, etc.)
-  }
+function isResultShape(x: any): x is { success: boolean; data?: any; error?: any } {
+  return !!x && typeof x === "object" && typeof x.success === "boolean";
+}
+
+function safeErrorMessage(e: any): string {
+  return e?.message ?? (typeof e === "string" ? e : JSON.stringify(e));
 }
 
 export function useFHE() {
   const [status, setStatus] = useState<FHEStatus>("booting");
   const [error, setError] = useState<string | null>(null);
 
-  // Backwards-compatible flags expected by your existing home.tsx
-  const initialized = true;
+  const [permit, setPermit] = useState<PermitState>(null);
 
-  const sdk = useMemo(() => getCofheSdk(), [status]);
+  // We store plaintext alongside encrypted payloads so the game can run client-side.
+  // This does not expose plaintext in UI, but allows deterministic gameplay logic.
+  const plainStoreRef = useRef(new WeakMap<object, number>());
+
+  const sdk = useMemo(() => getSdk(), [status]);
   const Encryptable = useMemo(() => getEncryptable(), [status]);
 
-  // A tiny client wrapper to keep your current game code working
-  // (Your game logic uses client.encrypt32() and client.unseal() synchronously.)
-  const client = useMemo(() => {
-    return {
-      encrypt32: (value: number) => {
-        // Current game code expects sync behavior.
-        // We keep it sync to avoid refactoring the whole game to async.
-        // Real CoFHE encryption is async and will be used later when we refactor.
-        return value;
-      },
-      unseal: (cipher: any) => {
-        // If it's already a number (mock mode), return it.
-        if (typeof cipher === "number") return cipher;
-
-        // If in the future you store { __plain }, support it.
-        if (cipher && typeof cipher === "object" && typeof cipher.__plain === "number") {
-          return cipher.__plain;
-        }
-
-        // Fallback
-        return 0;
-      },
-    };
+  const hasCdnGlobals = useMemo(() => {
+    const hasCdnFlag = window.__COFHE_STATUS__ === "loaded";
+    return hasCdnFlag && !!getSdk() && !!getEncryptable();
   }, []);
 
   useEffect(() => {
-    const cdnStatus = window.__COFHE_STATUS__;
-    const hasSdk = !!getCofheSdk();
-    const hasEncryptable = !!getEncryptable();
+    const hasCdnFlag = window.__COFHE_STATUS__ === "loaded";
+    const hasSdk = !!getSdk();
+    const hasEnc = !!getEncryptable();
 
-    if (cdnStatus === "failed") {
-      setStatus("cdn-missing");
-      return;
-    }
-
-    if (cdnStatus === "loaded" && hasSdk && hasEncryptable) {
+    if (hasCdnFlag && hasSdk && hasEnc) {
       setStatus("cdn-loaded");
       return;
     }
 
-    // If not sure yet, stay booting shortly.
+    if (window.__COFHE_STATUS__ === "failed") {
+      setStatus("cdn-missing");
+      setError("CoFHE CDN failed to load. Using mock mode.");
+      return;
+    }
+
     setStatus("booting");
   }, []);
 
   const initWithEthers = useCallback(async (args: InitArgs) => {
     setError(null);
 
-    const currentSdk = getCofheSdk();
+    const currentSdk = getSdk();
     if (!currentSdk) {
       setStatus("mock");
       setError("CoFHE SDK is not available on window.");
@@ -125,6 +96,7 @@ export function useFHE() {
 
     if (!args?.provider || !args?.signer) {
       setStatus("needs-wallet");
+      setError("Wallet/provider missing.");
       return false;
     }
 
@@ -137,104 +109,141 @@ export function useFHE() {
     try {
       setStatus("initializing");
 
-      const env = args.environment ?? "TESTNET";
+      // IMPORTANT: Use a single object param (new API style).
+      // Also disable auto-permit generation so we can control it from UI.
+      const initPayload = {
+        // Newer docs naming
+        ethersProvider: args.provider,
+        ethersSigner: args.signer,
 
-      // Support both possible signatures:
-      // - initializeWithEthers({ ... })
-      // - initializeWithEthers(provider, signer, env, ...)
-      if (currentSdk.initializeWithEthers.length >= 2) {
-        await currentSdk.initializeWithEthers(args.provider, args.signer, env, false);
-      } else {
-        const result = await currentSdk.initializeWithEthers({
-          provider: args.provider,
-          signer: args.signer,
-          ethersProvider: args.provider,
-          ethersSigner: args.signer,
-          environment: env,
-          generatePermit: false,
-        });
+        // Back-compat naming (some builds use these)
+        provider: args.provider,
+        signer: args.signer,
 
-        // Some versions return { success, error }
-        if (result && typeof result === "object" && "success" in result && result.success === false) {
-          throw new Error(result.error ?? "initializeWithEthers failed");
-        }
+        environment: args.environment ?? "TESTNET",
+        generatePermit: false,
+      };
+
+      const res = await currentSdk.initializeWithEthers(initPayload);
+
+      if (isResultShape(res) && !res.success) {
+        setStatus("error");
+        setError(res?.error?.message ?? JSON.stringify(res.error ?? res));
+        return false;
       }
 
-      setStatus("permit-required");
+      // If it doesn't return a Result object, treat it as success if no exception.
+      setStatus(permit ? "ready" : "permit-required");
       return true;
     } catch (e: any) {
       setStatus("error");
-      setError(e?.message ?? String(e));
+      setError(safeErrorMessage(e));
       return false;
     }
-  }, []);
+  }, [permit]);
 
-  const createSelfPermit = useCallback(async (args: PermitArgs) => {
+  const createSelfPermit = useCallback(async (issuer: string) => {
     setError(null);
 
-    const currentSdk = getCofheSdk();
-    if (!currentSdk) {
+    const currentSdk = getSdk();
+    if (!currentSdk || typeof currentSdk.createPermit !== "function") {
       setStatus("mock");
-      setError("CoFHE SDK is not available on window.");
-      return false;
-    }
-
-    if (typeof currentSdk.createPermit !== "function") {
-      setStatus("error");
       setError("createPermit is not available on the loaded SDK.");
       return false;
     }
 
     try {
-      const days = args.daysValid ?? 30;
-      const expiration = Math.floor(Date.now() / 1000) + days * 24 * 60 * 60;
+      // Docs-style: createPermit({ type: 'self', issuer })
+      const res = await currentSdk.createPermit({ type: "self", issuer });
 
-      const result = await currentSdk.createPermit({
-        type: "self",
-        issuer: args.issuer,
-        name: args.name ?? "Encrypted 2048 Permit",
-        expiration,
-      });
-
-      // Some versions return { success, error }
-      if (result && typeof result === "object" && "success" in result && result.success === false) {
-        throw new Error(result.error ?? "Permit creation failed");
+      if (isResultShape(res) && !res.success) {
+        setStatus("error");
+        setError(res?.error?.message ?? JSON.stringify(res.error ?? res));
+        return false;
       }
+
+      const p = isResultShape(res) ? res.data : res;
+
+      const permitIssuer = p?.issuer ?? p?.data?.issuer ?? issuer;
+      const hashFn = p?.getHash ?? p?.data?.getHash;
+
+      const permitHash =
+        typeof hashFn === "function" ? String(hashFn.call(p?.data ?? p)) : "";
+
+      setPermit({
+        issuer: String(permitIssuer),
+        hash: String(permitHash),
+        raw: p,
+      });
 
       setStatus("ready");
       return true;
     } catch (e: any) {
-      // If permit fails, do NOT break the app. Just stay in permit-required and show error.
-      setStatus("permit-required");
-      setError(e?.message ?? String(e));
+      setStatus("error");
+      setError(safeErrorMessage(e));
       return false;
     }
   }, []);
 
   const resetPermit = useCallback(() => {
-    safeClearCofheLocalStorage();
-    setError(null);
-
-    // If CDN is loaded, go back to cdn-loaded. Otherwise fallback to mock.
-    if (window.__COFHE_STATUS__ === "loaded" && getCofheSdk() && getEncryptable()) {
+    setPermit(null);
+    // If CDN is available, go back to "cdn-loaded" so UI can re-init.
+    if (hasCdnGlobals) {
       setStatus("cdn-loaded");
+      setError(null);
     } else {
       setStatus("mock");
+      setError(null);
     }
-  }, []);
+  }, [hasCdnGlobals]);
+
+  const client = useMemo(() => {
+    const currentSdk = getSdk();
+    const currentEnc = getEncryptable();
+
+    const encrypt32 = (value: number) => {
+      // Always allow mock encryption so the game never blocks.
+      if (!currentSdk || !currentEnc || status !== "ready") {
+        return value;
+      }
+
+      // Some SDKs require bigint, keep it safe.
+      const encValue = currentEnc.uint32(BigInt(value));
+
+      // We return a wrapper object so we can keep plaintext for local gameplay.
+      // The actual encrypted payload is stored under "__cipher".
+      const wrapper: any = { __cipher: encValue };
+      plainStoreRef.current.set(wrapper, value);
+      return wrapper;
+    };
+
+    const unseal = (maybeEncrypted: any) => {
+      if (maybeEncrypted == null) return 0;
+      if (typeof maybeEncrypted === "number") return maybeEncrypted;
+
+      if (typeof maybeEncrypted === "object") {
+        const v = plainStoreRef.current.get(maybeEncrypted);
+        if (typeof v === "number") return v;
+      }
+
+      // Fallback: unknown shape
+      return 0;
+    };
+
+    return {
+      mode: status === "ready" ? "cofhe" : "mock",
+      encrypt32,
+      unseal,
+    };
+  }, [status]);
 
   return {
-    // Current API
+    client,
+    initialized: true, // Always true so the game UI never shows a blank screen
     status,
     error,
-    sdk,
-    Encryptable,
     initWithEthers,
     createSelfPermit,
     resetPermit,
-
-    // Backwards-compatible API used by your current home.tsx
-    client,
-    initialized,
   };
 }
