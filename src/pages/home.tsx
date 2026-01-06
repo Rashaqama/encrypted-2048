@@ -4,6 +4,7 @@ import { useFHE } from "../fhe/useFHE";
 import {
   CIPHER_ACHIEVEMENTS_ADDRESS,
   CIPHER_ACHIEVEMENTS_ABI,
+  CIPHER_ACHIEVEMENTS_CHAIN_ID,
 } from "../lib/cipherAchievements";
 
 declare global {
@@ -16,7 +17,7 @@ type Direction = "left" | "right" | "up" | "down";
 
 type Tile =
   | { mode: "mock"; data: number }
-  | { mode: "cofhe"; data: bigint };
+  | { mode: "cofhe"; data: any };
 
 type Achievement = {
   id: "medium" | "big" | "legendary";
@@ -26,10 +27,7 @@ type Achievement = {
   levelIndex: number;
 };
 
-const BASE_SEPOLIA_CHAIN_ID = 84532;
 const ARB_SEPOLIA_CHAIN_ID = 421614;
-
-const BASE_SEPOLIA_HEX = "0x14a34";
 const ARB_SEPOLIA_HEX = "0x66eee";
 
 const ACHIEVEMENTS: Achievement[] = [
@@ -60,60 +58,35 @@ function shortAddr(addr: string) {
   return addr.slice(0, 5) + "..." + addr.slice(-4);
 }
 
-async function switchChain(chainIdHex: string) {
+async function switchToArbSepolia() {
   const eth = window.ethereum;
-  if (!eth?.request) throw new Error("Wallet does not support chain switching.");
+  if (!eth?.request) throw new Error("Wallet provider is missing.");
 
   try {
     await eth.request({
       method: "wallet_switchEthereumChain",
-      params: [{ chainId: chainIdHex }],
+      params: [{ chainId: ARB_SEPOLIA_HEX }],
     });
     return;
   } catch (e: any) {
     if (e?.code !== 4902) throw e;
   }
 
-  if (chainIdHex === BASE_SEPOLIA_HEX) {
-    await eth.request({
-      method: "wallet_addEthereumChain",
-      params: [
-        {
-          chainId: BASE_SEPOLIA_HEX,
-          chainName: "Base Sepolia",
-          nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-          rpcUrls: ["https://sepolia.base.org"],
-          blockExplorerUrls: ["https://sepolia.basescan.org"],
-        },
-      ],
-    });
-    return;
-  }
-
-  if (chainIdHex === ARB_SEPOLIA_HEX) {
-    await eth.request({
-      method: "wallet_addEthereumChain",
-      params: [
-        {
-          chainId: ARB_SEPOLIA_HEX,
-          chainName: "Arbitrum Sepolia",
-          nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-          rpcUrls: ["https://sepolia-rollup.arbitrum.io/rpc"],
-          blockExplorerUrls: ["https://sepolia.arbiscan.io"],
-        },
-      ],
-    });
-    return;
-  }
-
-  throw new Error("Unknown chain config for addEthereumChain.");
+  await eth.request({
+    method: "wallet_addEthereumChain",
+    params: [
+      {
+        chainId: ARB_SEPOLIA_HEX,
+        chainName: "Arbitrum Sepolia",
+        nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+        rpcUrls: ["https://sepolia-rollup.arbitrum.io/rpc"],
+        blockExplorerUrls: ["https://sepolia.arbiscan.io"],
+      },
+    ],
+  });
 }
 
 function emptyBoard(): (Tile | null)[][] {
-  return Array.from({ length: 4 }, () => Array.from({ length: 4 }, () => null));
-}
-
-function emptyPlainBoard(): (number | null)[][] {
   return Array.from({ length: 4 }, () => Array.from({ length: 4 }, () => null));
 }
 
@@ -121,15 +94,45 @@ function randomChoice<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function clampNumber(v: any): number | null {
-  if (v === null || v === undefined) return null;
-  const n = Number(v);
-  if (Number.isNaN(n)) return null;
-  return n;
+function rotateRight(mat: (number | null)[][]) {
+  const out: (number | null)[][] = emptyBoard().map((row) => row.slice()) as any;
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 4; c++) {
+      out[c][3 - r] = mat[r][c];
+    }
+  }
+  return out;
+}
+
+function slideRowLeft(row: (number | null)[]) {
+  const filtered = row.filter((x) => x !== null) as number[];
+  const out: (number | null)[] = [];
+  let gained = 0;
+
+  for (let i = 0; i < filtered.length; i++) {
+    if (i < filtered.length - 1 && filtered[i] === filtered[i + 1]) {
+      const merged = filtered[i] * 2;
+      out.push(merged);
+      gained += merged;
+      i++;
+    } else {
+      out.push(filtered[i]);
+    }
+  }
+
+  while (out.length < 4) out.push(null);
+  return { row: out, gained };
 }
 
 export default function Home() {
-  const { status: fheStatus, error: fheError, enableFHE, encryptUint32, unsealUint32, resetPermit } = useFHE();
+  const {
+    status: fheStatus,
+    error: fheError,
+    enableFHE,
+    resetPermit,
+    encryptUint32,
+    unsealUint32,
+  } = useFHE();
 
   const [board, setBoard] = useState<(Tile | null)[][]>(() => emptyBoard());
   const [score, setScore] = useState(0);
@@ -139,7 +142,6 @@ export default function Home() {
   const [walletSigner, setWalletSigner] = useState<any | null>(null);
 
   const [claimed, setClaimed] = useState<Record<string, boolean>>({});
-  const [unlocked, setUnlocked] = useState<Record<string, boolean>>({});
   const [txMessage, setTxMessage] = useState<string | null>(null);
   const [isClaiming, setIsClaiming] = useState(false);
 
@@ -166,6 +168,8 @@ export default function Home() {
       return;
     }
 
+    await switchToArbSepolia();
+
     const provider = new BrowserProvider(eth);
     await provider.send("eth_requestAccounts", []);
 
@@ -177,12 +181,8 @@ export default function Home() {
     setWalletAccount(addr);
 
     const net = await provider.getNetwork();
-    if (Number(net.chainId) !== BASE_SEPOLIA_CHAIN_ID) {
-      try {
-        await switchChain(BASE_SEPOLIA_HEX);
-      } catch {
-        // ignore
-      }
+    if (Number(net.chainId) !== ARB_SEPOLIA_CHAIN_ID) {
+      setTxMessage("Wrong network. Please switch to Arbitrum Sepolia.");
     }
   }, []);
 
@@ -205,8 +205,8 @@ export default function Home() {
 
       const { r, c } = randomChoice(empties);
       const value = Math.random() < 0.9 ? 2 : 4;
-      const enc = await encryptUint32(value);
 
+      const enc = await encryptUint32(value);
       const next = b.map((row) => row.slice());
       next[r][c] = enc;
       return next;
@@ -220,7 +220,7 @@ export default function Home() {
       if (t.mode === "mock") return t.data;
 
       const res = await unsealUint32(t.data);
-      if (!res.ok) throw new Error(res.error);
+      if (!res.ok) return null;
       return res.value;
     },
     [unsealUint32]
@@ -229,15 +229,13 @@ export default function Home() {
   const sealValue = useCallback(
     async (v: number | null): Promise<Tile | null> => {
       if (v === null) return null;
-      return await encryptUint32(v);
+      return encryptUint32(v);
     },
     [encryptUint32]
   );
 
   const bootGame = useCallback(async () => {
     setScore(0);
-    setTxMessage(null);
-
     let b = emptyBoard();
     b = await addRandomTile(b);
     b = await addRandomTile(b);
@@ -248,92 +246,13 @@ export default function Home() {
     void bootGame();
   }, [bootGame]);
 
-  function rotateRight(mat: (number | null)[][]) {
-    const out = emptyPlainBoard();
-    for (let r = 0; r < 4; r++) {
-      for (let c = 0; c < 4; c++) {
-        out[c][3 - r] = mat[r][c];
-      }
-    }
-    return out;
-  }
-
-  function slideRowLeft(row: (number | null)[]) {
-    const filtered = row.filter((x) => x !== null) as number[];
-    const out: (number | null)[] = [];
-    let gained = 0;
-
-    for (let i = 0; i < filtered.length; i++) {
-      if (i < filtered.length - 1 && filtered[i] === filtered[i + 1]) {
-        const merged = filtered[i] * 2;
-        out.push(merged);
-        gained += merged;
-        i++;
-      } else {
-        out.push(filtered[i]);
-      }
-    }
-
-    while (out.length < 4) out.push(null);
-    return { row: out, gained };
-  }
-
-  const refreshUnlocks = useCallback(async () => {
-    try {
-      let maxV = 0;
-      for (let r = 0; r < 4; r++) {
-        for (let c = 0; c < 4; c++) {
-          const v = await unsealTile(board[r][c]);
-          const n = clampNumber(v);
-          if (typeof n === "number" && n > maxV) maxV = n;
-        }
-      }
-
-      const next: Record<string, boolean> = {};
-      for (const ach of ACHIEVEMENTS) {
-        next[ach.id] = maxV >= ach.threshold;
-      }
-      setUnlocked(next);
-    } catch {
-      // If unseal fails (no permit), do not crash UI
-    }
-  }, [board, unsealTile]);
-
-  const upgradeBoardToCofhe = useCallback(async () => {
-    // Once FHE is ready, re-encrypt all mock tiles so board becomes fully encrypted
-    const next = emptyBoard();
-    for (let r = 0; r < 4; r++) {
-      for (let c = 0; c < 4; c++) {
-        const t = board[r][c];
-        if (!t) {
-          next[r][c] = null;
-          continue;
-        }
-
-        if (t.mode === "cofhe") {
-          next[r][c] = t;
-          continue;
-        }
-
-        next[r][c] = await encryptUint32(t.data);
-      }
-    }
-    setBoard(next);
-  }, [board, encryptUint32]);
-
-  useEffect(() => {
-    if (fheStatus === "ready") {
-      void upgradeBoardToCofhe().then(() => refreshUnlocks());
-    }
-  }, [fheStatus, upgradeBoardToCofhe, refreshUnlocks]);
-
   const move = useCallback(
     async (dir: Direction) => {
       if (movingRef.current) return;
       movingRef.current = true;
 
       try {
-        const plain = emptyPlainBoard();
+        const plain: (number | null)[][] = emptyBoard();
         for (let r = 0; r < 4; r++) {
           for (let c = 0; c < 4; c++) {
             plain[r][c] = await unsealTile(board[r][c]);
@@ -341,7 +260,9 @@ export default function Home() {
         }
 
         let working = plain;
-        const rotateTimes = dir === "left" ? 0 : dir === "up" ? 3 : dir === "right" ? 2 : 1;
+        const rotateTimes =
+          dir === "left" ? 0 : dir === "up" ? 3 : dir === "right" ? 2 : 1;
+
         for (let k = 0; k < rotateTimes; k++) working = rotateRight(working);
 
         let gainedTotal = 0;
@@ -357,7 +278,7 @@ export default function Home() {
         const changed = JSON.stringify(restored) !== JSON.stringify(plain);
         if (!changed) return;
 
-        const sealed = emptyBoard();
+        const sealed: (Tile | null)[][] = emptyBoard();
         for (let r = 0; r < 4; r++) {
           for (let c = 0; c < 4; c++) {
             sealed[r][c] = await sealValue(restored[r][c]);
@@ -389,9 +310,18 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [move]);
 
-  useEffect(() => {
-    void refreshUnlocks();
-  }, [board, refreshUnlocks]);
+  const maxPlainValue = useCallback(async () => {
+    let maxV = 0;
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 4; c++) {
+        const v = await unsealTile(board[r][c]);
+        if (typeof v === "number" && v > maxV) maxV = v;
+      }
+    }
+    return maxV;
+  }, [board, unsealTile]);
+
+  const unlocked = useMemo(() => new Set<string>(), []);
 
   const onEnableFHE = useCallback(async () => {
     setTxMessage(null);
@@ -402,10 +332,11 @@ export default function Home() {
     }
 
     try {
-      // 1) Switch to Arbitrum Sepolia for permit generation (Fhenix testnet)
-      await switchChain(ARB_SEPOLIA_HEX);
+      const net = await walletProvider.getNetwork();
+      if (Number(net.chainId) !== ARB_SEPOLIA_CHAIN_ID) {
+        await switchToArbSepolia();
+      }
 
-      // 2) Enable FHE + create permit
       const ok = await enableFHE({
         provider: walletProvider,
         signer: walletSigner,
@@ -413,21 +344,15 @@ export default function Home() {
       });
 
       if (!ok) {
-        setTxMessage("FHE enable failed. Check the error above.");
-      } else {
-        setTxMessage("FHE enabled (permit generated).");
+        setTxMessage("FHE enable failed. Check the FHE error message.");
+        return;
       }
 
-      // 3) Switch back to Base Sepolia for NFT minting
-      await switchChain(BASE_SEPOLIA_HEX);
+      setTxMessage("FHE is ready. Permit is set.");
     } catch (e: any) {
       setTxMessage(e?.message ?? String(e));
     }
   }, [walletProvider, walletSigner, walletAccount, enableFHE]);
-
-  const resetGame = useCallback(() => {
-    void bootGame();
-  }, [bootGame]);
 
   const claimNft = useCallback(
     async (ach: Achievement) => {
@@ -442,13 +367,13 @@ export default function Home() {
         setIsClaiming(true);
 
         const net = await walletProvider.getNetwork();
-        if (Number(net.chainId) !== BASE_SEPOLIA_CHAIN_ID) {
-          await switchChain(BASE_SEPOLIA_HEX);
+        if (Number(net.chainId) !== CIPHER_ACHIEVEMENTS_CHAIN_ID) {
+          await switchToArbSepolia();
         }
 
-        // Require unlock based on decrypted max (permit needed)
-        if (!unlocked[ach.id]) {
-          setTxMessage("Not unlocked yet (enable FHE and reach the threshold).");
+        const maxV = await maxPlainValue();
+        if (maxV < ach.threshold) {
+          setTxMessage("Threshold not reached yet.");
           return;
         }
 
@@ -476,7 +401,7 @@ export default function Home() {
         setIsClaiming(false);
       }
     },
-    [walletProvider, walletSigner, walletAccount, unlocked]
+    [walletProvider, walletSigner, walletAccount, maxPlainValue]
   );
 
   const cellClass = "w-[74px] h-[74px] rounded-xl bg-slate-100 shadow-inner";
@@ -484,13 +409,13 @@ export default function Home() {
 
   return (
     <div className="h-[100dvh] overflow-hidden bg-white">
-      <div className="mx-auto max-w-[860px] px-4 py-6 h-full flex flex-col min-h-0">
+      <div className="mx-auto max-w-[860px] px-4 py-6 h-full flex flex-col">
         <div className="text-center">
           <h1 className="text-4xl font-bold tracking-tight">Encrypted 2048 - test</h1>
           <div className="text-slate-500 mt-1">Score: {score}</div>
         </div>
 
-        <div className="mt-4 flex flex-col gap-3 flex-1 min-h-0">
+        <div className="mt-4 flex flex-col gap-3 min-h-0">
           <div className="border rounded-xl p-4 flex items-start justify-between gap-4">
             <div className="min-w-[220px]">
               <div className="font-semibold">FHE Access</div>
@@ -530,7 +455,7 @@ export default function Home() {
                   </button>
 
                   <button
-                    onClick={() => resetGame()}
+                    onClick={() => void bootGame()}
                     className="px-4 py-2 rounded-lg border text-sm font-semibold"
                   >
                     Reset Game
@@ -551,14 +476,11 @@ export default function Home() {
             <div className="p-4 rounded-2xl bg-white shadow-2xl">
               <div className="grid grid-cols-4 gap-3">
                 {board.flatMap((row, r) =>
-                  row.map((cell, c) => {
-                    const hasTile = !!cell;
-                    return (
-                      <div key={`${r}-${c}`} className={cellClass}>
-                        {hasTile ? <div className={tileClass} /> : null}
-                      </div>
-                    );
-                  })
+                  row.map((cell, c) => (
+                    <div key={`${r}-${c}`} className={cellClass}>
+                      {cell ? <div className={tileClass} /> : null}
+                    </div>
+                  ))
                 )}
               </div>
             </div>
@@ -593,18 +515,16 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="border rounded-xl p-4 flex-1 min-h-0 overflow-hidden">
-            <div className="font-semibold text-sm">FHE Achievements (on-chain ready)</div>
+          <div className="mt-2 border rounded-xl p-4 flex-1 min-h-0 overflow-hidden">
+            <div className="font-semibold text-sm">FHE Achievements (Arbitrum Sepolia)</div>
             <div className="text-xs text-slate-500 mt-1">
-              Mint happens on Base Sepolia (CipherAchievements).
+              Mint happens on Arbitrum Sepolia (CipherAchievements).
             </div>
 
             <div className="mt-3 h-full overflow-auto pr-2">
-              <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3 pb-2">
                 {ACHIEVEMENTS.map((ach) => {
                   const isDone = !!claimed[ach.id];
-                  const isUnlocked = !!unlocked[ach.id];
-
                   return (
                     <div
                       key={ach.id}
@@ -620,11 +540,11 @@ export default function Home() {
 
                       <div className="flex items-end flex-col gap-2">
                         <div className="text-[11px] text-slate-500">
-                          {isDone ? "Claimed" : isUnlocked ? "Unlocked" : "Locked"}
+                          {isDone ? "Claimed" : unlocked.has(ach.id) ? "Unlocked" : "Locked"}
                         </div>
                         <button
                           onClick={() => void claimNft(ach)}
-                          disabled={isClaiming || isDone || !walletAccount || !isUnlocked}
+                          disabled={isClaiming || isDone || !walletAccount}
                           className="px-3 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold disabled:opacity-50"
                         >
                           {isDone ? "Minted" : "Claim NFT"}
